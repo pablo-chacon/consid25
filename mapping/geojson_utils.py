@@ -1,4 +1,3 @@
-# mapping/geojson_utils.py
 from typing import List, Tuple, Dict, Any
 
 

@@ -11,7 +11,7 @@ def should_move_on_to_next_tick(response):
 def generate_customer_recommendations(map_obj, current_tick):
     dimX, dimY = map_obj["dimX"], map_obj["dimY"]
 
-    # Client departures
+    # Who leaves now?
     departing = customers_departing_at(map_obj, current_tick)
     if not departing:
         return []
@@ -28,7 +28,7 @@ def generate_customer_recommendations(map_obj, current_tick):
             "path": path  # if engine prefers 'route', flip the key name below
         })
 
-    # logging
+    # Helpful log
     sample = recs[:3]
     print(f"[tick {current_tick}] built {len(recs)} recommendation(s); sample: {sample}")
     return recs
@@ -66,17 +66,9 @@ def main():
 
     for i in range(total_ticks):
         while True:
-
             print(f"Playing tick: {i} with input: {input_payload}")
             start = time.perf_counter()
             game_response = client.post_game(input_payload)
-
-            if "errors" in game_response and game_response["errors"]:
-                print("Server validation errors:", game_response["errors"])
-
-            if "messages" in game_response and game_response["messages"]:
-                print("Server messages:", game_response["messages"])
-
             elapsed_ms = (time.perf_counter() - start) * 1000
             print(f"Tick {i} took: {elapsed_ms:.2f}ms")
 
