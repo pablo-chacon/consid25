@@ -1,155 +1,7 @@
 import sys
 import time
 from client import ConsiditionClient
-# --- drop this near the top of app.py ---
-from heapq import heappush, heappop
-import math
-
-WH_PER_KM = 150.0  # tune quickly (vehicle energy model)
-RESERVE_KWH = 4.0  # safety buffer
-GREEN_BONUS = 0.5  # lowers cost for green charging choices
-MAX_DETOUR_KM = 2.0  # acceptable extra to pick green over regular
-
-
-class Planner:
-    def __init__(self, map_obj):
-        self.map = map_obj
-        self.G, self.veh, self.cust, self.sta = self._from_map(map_obj)
-        self.assign = {}  # customer_id -> vehicle_id
-        self.plan = {}  # vehicle_id -> [node,...]
-        self.dest = {}  # vehicle_id -> target node (pickup, dropoff or station)
-
-    # map ingestion
-    def _from_map(self, m):
-        # Adjust field names to match the actual schema you print from get_map()
-        G = {n["id"]: n.get("edges", []) for n in m["graph"]}
-        veh = {v["id"]: {"node": v["node"], "soc": float(v["soc_kwh"])} for v in m["vehicles"]}
-        cust = {c["id"]: {"pickup": c["pickup"], "drop": c["dropoff"], "prefs": c.get("prefs", {})} for c in
-                m["customers"]}
-        sta = [{"node": s["node"], "kw": s.get("kw", 50), "green": bool(s.get("green", False))} for s in m["stations"]]
-        return G, veh, cust, sta
-
-    # ----- core utils -----
-    def _dist_km(self, a, b):
-        # If graph provides edge distances, rely on them; otherwise fallback
-        return 1.0
-
-    def _energy_needed_kwh(self, path_len_km):
-        return (WH_PER_KM * path_len_km) / 1000.0
-
-    def _neighbors(self, n):
-        # Expect edges like [{"to": node_id, "dist_km": float}]
-        return self.G.get(n, [])
-
-    def _astar(self, s, t):
-        # A* on given graph with edge 'dist_km' and straight-line heuristic if available
-        # If you lack coords, Dijkstra == A* with h=0
-        openq, came, g = [], {}, {s: 0.0}
-        heappush(openq, (0.0, s))
-        while openq:
-            _, u = heappop(openq)
-            if u == t:
-                break
-            for e in self._neighbors(u):
-                v, w = e["to"], float(e.get("dist_km", 1.0))
-                ng = g[u] + w
-                if ng < g.get(v, math.inf):
-                    g[v] = ng;
-                    came[v] = u
-                    heappush(openq, (ng, v))
-        if t not in came and s != t:
-            return None, math.inf
-        # Reconstruct
-        path = [t]
-        while path[-1] != s:
-            path.append(came[path[-1]])
-        path.reverse()
-        return path, g.get(t, 0.0)
-
-    def _nearest_station(self, from_node, prefer_green=True):
-        best = None
-        for s in self.sta:
-            path, d = self._astar(from_node, s["node"])
-            if path is None:
-                continue
-            cost = d - (GREEN_BONUS if (prefer_green and s["green"]) else 0.0)
-            if best is None or cost < best[0]:
-                best = (cost, path, d, s)
-        return best  # (score, path, dist_km, station)
-
-    # ----- one-tick plan -----
-    def step(self):
-        recs = []
-
-        # 1) Assign unassigned customers greedily with energy feasibility
-        unassigned = [cid for cid in self.cust if cid not in self.assign]
-        for cid in unassigned:
-            c = self.cust[cid]
-            best = None
-            for vid, v in self.veh.items():
-                # pickup path
-                p_pick, d1 = self._astar(v["node"], c["pickup"])
-                if p_pick is None:
-                    continue
-                # dropoff path
-                p_drop, d2 = self._astar(c["pickup"], c["drop"])
-                if p_drop is None:
-                    continue
-
-                need_kwh = self._energy_needed_kwh(d1 + d2)
-                if v["soc"] >= need_kwh + RESERVE_KWH:
-                    score = d1 + d2
-                    if best is None or score < best[0]:
-                        best = (score, vid, p_pick + p_drop[1:], need_kwh)
-                else:
-                    # consider one charge
-                    st = self._nearest_station(v["node"], prefer_green=True)
-                    if not st:
-                        continue
-                    _, p_charge, dS, s_meta = st
-                    p_after, d_after = self._astar(s_meta["node"], c["pickup"])
-                    p_drop2, d2b = self._astar(c["pickup"], c["drop"])
-                    if p_after and p_drop2:
-                        score = dS + d_after + d2b - (GREEN_BONUS if s_meta["green"] else 0.0)
-                        if best is None or score < best[0]:
-                            best = (score, vid, p_charge + p_after[1:] + p_drop2[1:], None)
-
-            if best:
-                _, vid, full_path, _ = best
-                self.assign[cid] = vid
-                self.plan[vid] = full_path
-                self.dest[vid] = self.cust[cid]["drop"]
-
-        # 2) Emit one-step actions for each vehicle
-        for vid, v in self.veh.items():
-            cur = v["node"]
-            path = self.plan.get(vid)
-            if not path or len(path) < 2:
-                # idle or arrived
-                recs.append({"vehicleId": vid, "action": "wait"})
-                continue
-
-            nxt = path[1]
-            # Consume energy of this edge
-            # (In a real build, read exact edge dist; here we grab from neighbors)
-            edge = next((e for e in self._neighbors(cur) if e["to"] == nxt), None)
-            dist = float(edge.get("dist_km", 1.0)) if edge else 1.0
-            need = self._energy_needed_kwh(dist)
-
-            if v["soc"] < need + RESERVE_KWH:
-                # detour to nearest station this tick
-                st = self._nearest_station(cur, prefer_green=True)
-                if st:
-                    _, p_charge, dS, s_meta = st
-                    # step one hop toward station
-                    hop = p_charge[1] if len(p_charge) >= 2 else cur
-                    recs.append({"vehicleId": vid, "action": "drive", "to": hop})
-                else:
-                    recs.append({"vehicleId": vid, "action": "wait"})
-            else:
-                recs.append({"vehicleId": vid, "action": "drive", "to": nxt})
-
-        return recs
+from mapping.map_utils import customers_departing_at, shortest_path_grid
 
 
 def should_move_on_to_next_tick(response):
@@ -157,7 +9,29 @@ def should_move_on_to_next_tick(response):
 
 
 def generate_customer_recommendations(map_obj, current_tick):
-    return []
+    dimX, dimY = map_obj["dimX"], map_obj["dimY"]
+
+    # Client departures
+    departing = customers_departing_at(map_obj, current_tick)
+    if not departing:
+        return []
+
+    recs = []
+    for c in departing:
+        start = c["fromNode"]
+        goal = c["toNode"]
+        path = shortest_path_grid(start, goal, dimX, dimY)
+
+        # Minimal viable schema (common in these engines)
+        recs.append({
+            "customerId": c["id"],
+            "path": path  # if engine prefers 'route', flip the key name below
+        })
+
+    # logging
+    sample = recs[:3]
+    print(f"[tick {current_tick}] built {len(recs)} recommendation(s); sample: {sample}")
+    return recs
 
 
 def generate_tick(map_obj, current_tick):
@@ -168,9 +42,9 @@ def generate_tick(map_obj, current_tick):
 
 
 def main():
-    api_key = "INSERT API KEY HERE"
-    base_url = "INSERT YOUR CHOSEN PORT HERE"
-    map_name = "INSERT MAP NAME HERE"
+    api_key = "73e3373c-d83e-43b3-b383-c30dcb22b6e6"
+    base_url = "http://localhost:8080/api"
+    map_name = "Turbohill"
 
     client = ConsiditionClient(base_url, api_key)
     map_obj = client.get_map(map_name)
@@ -192,9 +66,17 @@ def main():
 
     for i in range(total_ticks):
         while True:
+
             print(f"Playing tick: {i} with input: {input_payload}")
             start = time.perf_counter()
             game_response = client.post_game(input_payload)
+
+            if "errors" in game_response and game_response["errors"]:
+                print("Server validation errors:", game_response["errors"])
+
+            if "messages" in game_response and game_response["messages"]:
+                print("Server messages:", game_response["messages"])
+
             elapsed_ms = (time.perf_counter() - start) * 1000
             print(f"Tick {i} took: {elapsed_ms:.2f}ms")
 
