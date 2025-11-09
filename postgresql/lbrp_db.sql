@@ -353,6 +353,113 @@ CREATE TABLE IF NOT EXISTS reroutes (
                                         created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Considition namespace
+CREATE TABLE IF NOT EXISTS consid_maps (
+                                       map_name TEXT PRIMARY KEY,
+                                       dim_x INT NOT NULL,
+                                       dim_y INT NOT NULL,
+                                       created_at TIMESTAMPTZ DEFAULT now()
+);
+
+
+CREATE TABLE IF NOT EXISTS consid_nodes (
+                                        map_name TEXT NOT NULL,
+                                        node_id TEXT NOT NULL,  -- e.g. "1.7"
+                                        x INT NOT NULL,
+                                        y INT NOT NULL,
+                                        zone_id TEXT,
+                                        PRIMARY KEY (map_name, node_id),
+                                        FOREIGN KEY (map_name) REFERENCES consid_maps(map_name) ON DELETE CASCADE
+);
+
+
+CREATE TABLE IF NOT EXISTS consid_node_targets (
+                                       map_name TEXT NOT NULL,
+                                       node_id TEXT NOT NULL,
+                                       target_type TEXT NOT NULL,     -- 'Null' | 'ChargingStation' | ...
+                                       target_props JSONB NOT NULL DEFAULT '{}'::jsonb,
+                                       PRIMARY KEY (map_name, node_id),
+                                       FOREIGN KEY (map_name, node_id) REFERENCES consid_nodes(map_name, node_id) ON DELETE CASCADE
+);
+
+
+CREATE TABLE IF NOT EXISTS consid_ticks (
+                                        map_name TEXT NOT NULL,
+                                        tick INT NOT NULL,
+                                        ingested_at TIMESTAMPTZ DEFAULT now(),
+                                        PRIMARY KEY (map_name, tick),
+                                        FOREIGN KEY (map_name) REFERENCES consid_maps(map_name) ON DELETE CASCADE
+);
+
+
+CREATE TABLE IF NOT EXISTS consid_charger_status (
+                                         map_name TEXT NOT NULL,
+                                         tick INT NOT NULL,
+                                         node_id TEXT NOT NULL,
+                                         available INT,
+                                         broken INT,
+                                         total INT,
+                                         speed_per_charger INT,
+                                         PRIMARY KEY (map_name, tick, node_id),
+                                         FOREIGN KEY (map_name, tick) REFERENCES consid_ticks(map_name, tick) ON DELETE CASCADE,
+                                         FOREIGN KEY (map_name, node_id) REFERENCES consid_nodes(map_name, node_id) ON DELETE CASCADE
+);
+
+-- Neighbor grid edges for A* or preview routing
+CREATE TABLE IF NOT EXISTS consid_edges (
+                                        map_name TEXT NOT NULL,
+                                        from_node TEXT NOT NULL,
+                                        to_node TEXT NOT NULL,
+                                        cost NUMERIC NOT NULL,
+                                        PRIMARY KEY (map_name, from_node, to_node),
+                                        FOREIGN KEY (map_name, from_node) REFERENCES consid_nodes(map_name, node_id) ON DELETE CASCADE
+);
+
+
+-- Per-EV per-tick trace (grid-based)
+CREATE TABLE IF NOT EXISTS ev_trajectories (
+                                       map_name TEXT NOT NULL,
+                                       ev_id    TEXT NOT NULL,           -- vehicle id
+                                       tick     INT  NOT NULL,           -- sim tick (or real step)
+                                       node_id  TEXT NOT NULL,           -- "x.y" or grid id
+                                       x        INT  NOT NULL,
+                                       y        INT  NOT NULL,
+
+                                       soc_kwh          NUMERIC,         -- state of charge (kWh)
+                                       battery_kwh      NUMERIC,         -- capacity (kWh)
+                                       state            TEXT,            -- driving|charging|waiting|boarding|alighting|idle
+                                       customer_id      TEXT,            -- if carrying a customer/group
+                                       trip_intent_id   TEXT,            -- optional: current mission/trip id
+                                       meta             JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+                                       ts               TIMESTAMPTZ DEFAULT now(),  -- ingest timestamp (not sim time)
+
+                                       PRIMARY KEY (map_name, ev_id, tick),
+                                       FOREIGN KEY (map_name, node_id) REFERENCES consid_nodes(map_name, node_id) ON DELETE CASCADE
+);
+
+-- Discrete EV events (charging, pickup, dropoff, reroute, etc.)
+CREATE TABLE IF NOT EXISTS ev_events (
+                                     map_name   TEXT NOT NULL,
+                                     ev_id      TEXT NOT NULL,
+                                     tick       INT  NOT NULL,
+                                     event_type TEXT NOT NULL, -- charge_start|charge_end|pickup|dropoff|reroute|fault|wait_start|wait_end
+                                     node_id    TEXT NOT NULL,
+                                     meta       JSONB NOT NULL DEFAULT '{}'::jsonb,
+                                     ts         TIMESTAMPTZ DEFAULT now(),
+                                     PRIMARY KEY (map_name, ev_id, tick, event_type)
+);
+
+-- Link a grid node to a public-transit stop_point (bidirectional by convention)
+CREATE TABLE IF NOT EXISTS transfer_edges (
+                                      map_name  TEXT NOT NULL,
+                                      node_id   TEXT NOT NULL,      -- grid node (consid_nodes)
+                                      stop_gid  TEXT NOT NULL,      -- your GTFS stop_point/site gid
+                                      xfer_cost_s INT NOT NULL DEFAULT 90,  -- park/lock/board penalty
+                                      meta      JSONB NOT NULL DEFAULT '{}'::jsonb,
+                                      PRIMARY KEY (map_name, node_id, stop_gid)
+);
+
 -- Indexes (spatial and performance)
 CREATE INDEX IF NOT EXISTS "optimized_routes_path_idx" ON "optimized_routes" USING GIST ("path");
 CREATE INDEX IF NOT EXISTS "trajectory_idx" ON "trajectories" USING GIN ("trajectory" jsonb_path_ops);
@@ -397,8 +504,26 @@ CREATE INDEX IF NOT EXISTS "geodata_client_time_idx" ON "geodata" ("client_id","
 CREATE INDEX IF NOT EXISTS "mqtt_sessions_client_bounds_idx" ON "mqtt_sessions" ("client_id","start_time","end_time");
 CREATE INDEX IF NOT EXISTS "optimized_routes_client_time_idx" ON "optimized_routes" ("client_id","created_at" DESC);
 CREATE INDEX IF NOT EXISTS "reroutes_client_time_idx" ON "reroutes" ("client_id","created_at" DESC);
+-- Consid/EV's indexes
+CREATE INDEX IF NOT EXISTS idx_cons_nodes_map_xy ON consid_nodes (map_name, x, y);
+CREATE INDEX IF NOT EXISTS idx_cons_nodes_zone ON consid_nodes (zone_id);
+CREATE INDEX IF NOT EXISTS idx_cons_targets_type ON consid_node_targets (target_type);
+CREATE INDEX IF NOT EXISTS idx_cons_targets_props_gin ON consid_node_targets USING GIN (target_props jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS idx_cons_ticks_map_ingested ON consid_ticks (map_name, ingested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cons_charger_status_tick ON consid_charger_status (map_name, tick);
+CREATE INDEX IF NOT EXISTS idx_cons_charger_speed_available ON consid_charger_status (speed_per_charger DESC, available DESC);
+CREATE INDEX IF NOT EXISTS idx_cons_edges_fromnode ON consid_edges (map_name, from_node);
+CREATE INDEX IF NOT EXISTS idx_cons_edges_tonode ON consid_edges (map_name, to_node);
+CREATE INDEX IF NOT EXISTS idx_cons_ticks_map_tick ON consid_ticks (map_name, tick DESC);
+CREATE INDEX IF NOT EXISTS idx_ev_traj_ev_scan ON ev_trajectories (map_name, ev_id, tick);
+CREATE INDEX IF NOT EXISTS idx_ev_traj_node_lookup ON ev_trajectories (map_name, node_id, tick);
+CREATE INDEX IF NOT EXISTS idx_ev_traj_state ON ev_trajectories (state);
+CREATE INDEX IF NOT EXISTS idx_ev_traj_meta_gin ON ev_trajectories USING GIN (meta jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS idx_ev_events_type ON ev_events (map_name, event_type, tick DESC);
+CREATE INDEX IF NOT EXISTS idx_ev_events_node ON ev_events (map_name, node_id, tick DESC);
+CREATE INDEX IF NOT EXISTS idx_transfer_edges_lookup ON transfer_edges (map_name, node_id);
 
-
+-- Views
 CREATE OR REPLACE VIEW "view_routing_candidates_gtfsrt" AS
 SELECT
     ar.client_id,
@@ -764,7 +889,7 @@ FROM (
      ) x
 WHERE rn = 1;
 
--- POIs ⟷ GTFS stops (nearest + within radius)
+-- POIs to GTFS stops (nearest + within radius)
 CREATE OR REPLACE VIEW "view_pois_nearest_stop" AS
 SELECT
     p."poi_id",
@@ -818,8 +943,7 @@ FROM "pois" p
          JOIN "gtfs_stops" s
               ON ST_DWithin(p."geom"::geography, s."geom"::geography, 300);
 
-
--- 2) Latest routes (optimized + reroutes) per client, like view_latest_client_trajectories
+-- Latest routes (optimized + reroutes) per client, like view_latest_client_trajectories
 CREATE OR REPLACE VIEW "view_latest_client_routes" AS
 SELECT *
 FROM (
@@ -829,8 +953,6 @@ FROM (
          FROM "view_routes_history" h
      ) sub
 WHERE rn <= 8;
-
-
 
 -- A* and MAPF unified
 CREATE OR REPLACE VIEW "view_routes_astar_mapf_unified" AS
@@ -864,7 +986,6 @@ SELECT
     mr."created_at"
 FROM "mapf_routes" mr;
 
-
 -- Latest (one) per client across A*+MAPF
 CREATE OR REPLACE VIEW "view_routes_astar_mapf_latest" AS
 SELECT *
@@ -876,9 +997,8 @@ FROM (
      ) x
 WHERE rn = 1;
 
-
 -- ETA accuracy vs actual departure (error in seconds, + means ETA was early)
---   Matches A* predicted_eta with nearest departure at same stop within ±5 minutes.
+-- Matches A* predicted_eta with nearest departure at same stop within ±5 minutes.
 CREATE OR REPLACE VIEW "view_eta_accuracy_seconds" AS
 WITH eta_base AS (
     SELECT
@@ -920,7 +1040,6 @@ SELECT
 FROM nearest_departure n
 WHERE n.rn = 1;
 
-
 -- Per-client boarding-window hits (40–90s window), last 24h
 CREATE OR REPLACE VIEW "view_boarding_window_hit_rate" AS
 WITH candidates AS (
@@ -943,7 +1062,6 @@ SELECT
 FROM candidates
 GROUP BY "client_id";
 
-
 -- Latest live position per client (point geom)
 CREATE OR REPLACE VIEW "view_geodata_latest_point" AS
 SELECT
@@ -964,7 +1082,6 @@ FROM (
      ) g
 WHERE g.rn = 1;
 
-
 -- Stop usage by client (last 7 days)
 CREATE OR REPLACE VIEW "view_stop_usage_7d" AS
 SELECT
@@ -976,7 +1093,6 @@ SELECT
 FROM "view_routes_history" h
 WHERE h."created_at" >= NOW() - INTERVAL '7 days'
 GROUP BY h."client_id", COALESCE(h."stop_id", '∅');
-
 
 -- Predicted POIs → nearest stops (prep for schedule/departure lookups)
 CREATE OR REPLACE VIEW "view_predicted_poi_nearest_stop" AS
@@ -1001,7 +1117,6 @@ FROM "predicted_pois_sequence" p
     ORDER BY p."geom" <-> gs."geom"
     LIMIT 1
     ) s ON TRUE;
-
 
 -- Weekly plan joined with POI labels + nearest stop
 CREATE OR REPLACE VIEW "view_client_weekly_schedule_enriched" AS
@@ -1033,7 +1148,6 @@ FROM "client_weekly_schedule" w
     LIMIT 1
     ) pn ON TRUE;
 
-
 -- “Feasible next departures per client” (one best per client right now)
 CREATE OR REPLACE VIEW "view_next_feasible_departure_per_client" AS
 SELECT *
@@ -1045,4 +1159,80 @@ FROM (
          WHERE d."departure_time" >= NOW()
      ) q
 WHERE rn = 1;
+
+-- Latest tick per map
+CREATE OR REPLACE VIEW consid_latest_tick AS
+    SELECT
+        map_name, MAX(tick) AS tick
+    FROM consid_ticks
+GROUP BY map_name;
+
+-- Chargers as routable POIs
+CREATE OR REPLACE VIEW view_assets_chargers AS
+    SELECT
+        ('consid:' || n.map_name || ':' || n.node_id)   AS asset_id,
+        'charging_station'                               AS asset_type,
+        n.map_name,
+        n.node_id,
+        n.x, n.y,
+        t.target_props                                   AS meta
+    FROM consid_node_targets t
+             JOIN consid_nodes n USING (map_name, node_id)
+WHERE t.target_type = 'ChargingStation';
+
+-- Ensure consistent quoting
+DROP VIEW IF EXISTS "view_assets_chargers" CASCADE;
+CREATE OR REPLACE VIEW "view_assets_chargers" AS
+SELECT
+    ('consid:' || n."map_name" || ':' || n."node_id") AS asset_id,
+    'charging_station'::text                          AS asset_type,
+    n."map_name",
+    n."node_id",
+    n."x",
+    n."y",
+    t."target_props"                                  AS meta
+FROM "consid_node_targets" t
+         JOIN "consid_nodes" n
+              ON n."map_name" = t."map_name"
+                  AND n."node_id"  = t."node_id"
+WHERE t."target_type" = 'ChargingStation';
+
+-- Unify EV ticks with LIVE human positions (from geodata latest)
+DROP VIEW IF EXISTS "view_trajectories_unified" CASCADE;
+CREATE OR REPLACE VIEW "view_trajectories_unified" AS
+SELECT
+    'ev'::text                       AS mode,
+    et."map_name"                    AS map_name,
+    et."ev_id"                       AS agent_id,
+    et."tick"                        AS tick,
+    et."node_id"                     AS node_id,
+    et."x"::double precision         AS x,
+    et."y"::double precision         AS y,
+    et."soc_kwh"                     AS soc_kwh,
+    et."battery_kwh"                 AS battery_kwh,
+    et."state"                       AS state,
+    et."customer_id"                 AS customer_id,
+    et."meta"                        AS meta
+FROM "ev_trajectories" et
+
+UNION ALL
+
+SELECT
+    'human'::text                    AS mode,
+    NULL::text                       AS map_name,
+    g."client_id"                    AS agent_id,
+    NULL::int                        AS tick,
+    NULL::text                       AS node_id,
+    g."lon"::double precision        AS x,
+    g."lat"::double precision        AS y,
+    NULL::numeric                    AS soc_kwh,
+    NULL::numeric                    AS battery_kwh,
+    g."activity"                     AS state,
+    NULL::text                       AS customer_id,
+    jsonb_build_object(
+            'session_id', g."session_id",
+            'speed',      g."speed",
+            'timestamp',  g."timestamp"
+    )                                AS meta
+FROM "view_geodata_latest_point" g;
 

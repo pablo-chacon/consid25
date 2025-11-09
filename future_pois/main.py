@@ -12,7 +12,7 @@ _last_weekly_ts = 0
 
 
 def main():
-    logging.info("🚀 future_pois cycle starting…")
+    logging.info("Future_pois cycle starting…")
     time.sleep(10)
 
     global _last_weekly_ts
@@ -23,14 +23,14 @@ def main():
 
         for client_id in clients:
             # Daily: always try; fall back handled downstream if sequence ends up empty.
-            logging.info(f"🧠 Daily predict → {client_id}")
+            logging.info(f"Daily predict → {client_id}")
             seq_daily = predict_next_poi(client_id, "daily", get_poi_and_patterns)
             if not seq_daily:
                 logging.info(f"ℹ️ {client_id}: no POI/pattern signal yet — routing will use stop-point fallback.")
 
             # Weekly: only on cadence (self-healing)
             if run_weekly:
-                logging.info(f"🧠 Weekly predict → {client_id}")
+                logging.info(f"Weekly predict → {client_id}")
                 _ = predict_next_poi(client_id, "weekly", get_poi_and_patterns)
 
         if run_weekly:

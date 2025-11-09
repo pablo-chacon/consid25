@@ -71,7 +71,7 @@ def make_sequence(feature_rows, timesteps):
     """
     Build a (1, timesteps, F) array from a list of feature dicts in temporal order.
 
-    feature_rows: iterable of dicts, each mapping feature_name -> value (float‑castable)
+    feature_rows: iterable of dicts, each ev_subscriber feature_name -> value (float‑castable)
     timesteps: required sequence length (e.g., 60; must match training)
 
     If fewer than timesteps rows are provided, we left‑pad with the first row.

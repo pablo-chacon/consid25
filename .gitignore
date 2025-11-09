@@ -1,2 +1,4 @@
 /models/saved_models/
 /.venv/
+__pycache__
+.env
