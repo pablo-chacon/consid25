@@ -460,6 +460,53 @@ CREATE TABLE IF NOT EXISTS transfer_edges (
                                       PRIMARY KEY (map_name, node_id, stop_gid)
 );
 
+CREATE TABLE IF NOT EXISTS "consid_games" (
+                                              "game_id"    TEXT PRIMARY KEY,
+                                              "map_name"   TEXT NOT NULL REFERENCES "consid_maps"("map_name") ON DELETE CASCADE,
+                                              "play_to_tick" INT NOT NULL,
+                                              "started_at" TIMESTAMPTZ DEFAULT now(),
+                                              "last_response_at" TIMESTAMPTZ,
+                                              "score_total" NUMERIC,
+                                              "score_kwh_revenue" NUMERIC,
+                                              "score_customer_satisfaction" NUMERIC
+);
+
+CREATE TABLE IF NOT EXISTS "consid_customers" (
+                                                  "map_name"     TEXT NOT NULL,
+                                                  "customer_id"  TEXT NOT NULL,
+                                                  "persona"      TEXT,
+                                                  "vehicle_type" TEXT,
+                                                  "max_charge_kwh" NUMERIC,
+                                                  "ev_id"        TEXT,       -- if the API binds a vehicle identity
+                                                  "created_at"   TIMESTAMPTZ DEFAULT now(),
+                                                  PRIMARY KEY ("map_name", "customer_id")
+);
+
+
+CREATE TABLE IF NOT EXISTS "consid_zones" (
+                                              "map_name"  TEXT NOT NULL REFERENCES "consid_maps"("map_name") ON DELETE CASCADE,
+                                              "zone_id"   TEXT NOT NULL,
+                                              "bbox"      JSONB,                 -- or 4 ints if you prefer
+                                              "meta"      JSONB NOT NULL DEFAULT '{}'::jsonb,
+                                              PRIMARY KEY ("map_name","zone_id")
+);
+
+CREATE TABLE IF NOT EXISTS "consid_zone_logs" (
+                                                  "map_name"        TEXT NOT NULL,
+                                                  "tick"            INT  NOT NULL,
+                                                  "zone_id"         TEXT NOT NULL,
+                                                  "total_production"   NUMERIC,      -- kWh produced this tick
+                                                  "total_demand"       NUMERIC,      -- kWh demand
+                                                  "total_revenue"      NUMERIC,      -- if provided
+                                                  "weather_type"       TEXT,
+                                                  "sourceinfo_json"    JSONB,        -- detailed per-source arrays
+                                                  "storageinfo_json"   JSONB,        -- storages arrays
+                                                  "ingested_at"        TIMESTAMPTZ DEFAULT now(),
+                                                  PRIMARY KEY ("map_name","tick","zone_id"),
+                                                  FOREIGN KEY ("map_name","zone_id") REFERENCES "consid_zones"("map_name","zone_id") ON DELETE CASCADE
+);
+
+
 -- Indexes (spatial and performance)
 CREATE INDEX IF NOT EXISTS "optimized_routes_path_idx" ON "optimized_routes" USING GIST ("path");
 CREATE INDEX IF NOT EXISTS "trajectory_idx" ON "trajectories" USING GIN ("trajectory" jsonb_path_ops);
@@ -522,6 +569,9 @@ CREATE INDEX IF NOT EXISTS idx_ev_traj_meta_gin ON ev_trajectories USING GIN (me
 CREATE INDEX IF NOT EXISTS idx_ev_events_type ON ev_events (map_name, event_type, tick DESC);
 CREATE INDEX IF NOT EXISTS idx_ev_events_node ON ev_events (map_name, node_id, tick DESC);
 CREATE INDEX IF NOT EXISTS idx_transfer_edges_lookup ON transfer_edges (map_name, node_id);
+CREATE INDEX IF NOT EXISTS "idx_cons_customers_map_persona" ON "consid_customers" ("map_name","persona");
+CREATE INDEX IF NOT EXISTS "idx_cons_zone_logs_tick" ON "consid_zone_logs" ("map_name","tick");
+CREATE INDEX IF NOT EXISTS "idx_cons_zone_logs_green" ON "consid_zone_logs" ((COALESCE("total_production",0) - COALESCE("total_demand",0)) DESC);
 
 -- Views
 CREATE OR REPLACE VIEW "view_routing_candidates_gtfsrt" AS
@@ -583,7 +633,6 @@ FROM
         JOIN
     gtfs_routes r ON t.route_id = r.route_id;
 
-
 -- Active Clients view.
 CREATE OR REPLACE VIEW "view_active_clients_geodata" AS
 SELECT client_id
@@ -604,7 +653,6 @@ SELECT DISTINCT ON (g."client_id")
     g."session_id"
 FROM "geodata" AS g
 ORDER BY g."client_id", g."timestamp" DESC, g."updated_at" DESC;
-
 
 
 CREATE OR REPLACE VIEW "view_astar_eta" AS
@@ -630,15 +678,14 @@ FROM astar_routes ar
 
 
 CREATE OR REPLACE VIEW view_top_daily_poi AS
-SELECT DISTINCT ON ("client_id") *
-FROM "predicted_pois_sequence"
-WHERE "prediction_type" = 'daily'
-ORDER BY "client_id", "predicted_visit_time" ASC;
+    SELECT DISTINCT ON ("client_id") *
+    FROM "predicted_pois_sequence"
+    WHERE "prediction_type" = 'daily'
+    ORDER BY "client_id", "predicted_visit_time" ASC;
 
 
 -- Combined POIs for routing
 CREATE OR REPLACE VIEW view_combined_pois AS
--- stable POIs (no predicted time)
 SELECT
     p.client_id,
     p.lat,
@@ -1236,3 +1283,44 @@ SELECT
     )                                AS meta
 FROM "view_geodata_latest_point" g;
 
+
+DROP VIEW IF EXISTS "consid_latest_charger_status" CASCADE;
+CREATE VIEW "consid_latest_charger_status" AS
+SELECT cs."map_name", cs."node_id",
+       cs."available", cs."broken", cs."total", cs."speed_per_charger"
+FROM "consid_charger_status" cs
+         JOIN (
+    SELECT "map_name", "node_id", MAX("tick") AS max_tick
+    FROM "consid_charger_status"
+    GROUP BY "map_name","node_id"
+) m ON m."map_name" = cs."map_name" AND m."node_id" = cs."node_id" AND m."max_tick" = cs."tick";
+
+
+DROP VIEW IF EXISTS "consid_greenest_zones_now" CASCADE;
+CREATE VIEW "consid_greenest_zones_now" AS
+WITH lt AS (
+    SELECT "map_name", MAX("tick") AS tick
+    FROM "consid_zone_logs"
+    GROUP BY "map_name"
+)
+SELECT z."map_name", z."zone_id",
+       zl."total_production", zl."total_demand",
+       (COALESCE(zl."total_production",0) - COALESCE(zl."total_demand",0)) AS "surplus_kwh",
+       zl."weather_type"
+FROM lt
+         JOIN "consid_zone_logs" zl
+              ON zl."map_name" = lt."map_name" AND zl."tick" = lt."tick"
+         JOIN "consid_zones" z
+              ON z."map_name" = zl."map_name" AND z."zone_id" = zl."zone_id"
+ORDER BY "surplus_kwh" DESC;
+
+
+DROP VIEW IF EXISTS "view_ev_latest_state" CASCADE;
+CREATE VIEW "view_ev_latest_state" AS
+SELECT *
+FROM (
+         SELECT et.*,
+                ROW_NUMBER() OVER (PARTITION BY et."map_name", et."ev_id" ORDER BY et."tick" DESC) AS rn
+         FROM "ev_trajectories" et
+     ) x
+WHERE rn = 1;

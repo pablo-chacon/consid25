@@ -2,11 +2,14 @@ import sys
 import time
 from client import ConsiditionClient
 
+
 def should_move_on_to_next_tick(response):
     return True
 
+
 def generate_customer_recommendations(map_obj, current_tick):
     return []
+
 
 def generate_tick(map_obj, current_tick):
     return {
@@ -14,10 +17,11 @@ def generate_tick(map_obj, current_tick):
         "customerRecommendations": generate_customer_recommendations(map_obj, current_tick),
     }
 
+
 def main():
-    api_key = "INSERT API KEY HERE"
-    base_url = "INSERT YOUR CHOSEN PORT HERE"
-    map_name = "INSERT MAP NAME HERE"
+    api_key = "73e3373c-d83e-43b3-b383-c30dcb22b6e6"
+    base_url = "http://localhost:8080/"
+    map_name = "Turbohill"
 
     client = ConsiditionClient(base_url, api_key)
 
@@ -81,6 +85,7 @@ def main():
             }
 
     print(f"Final score: {final_score}")
+
 
 if __name__ == "__main__":
     main()

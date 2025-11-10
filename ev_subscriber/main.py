@@ -3,6 +3,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import FastAPI, Body, HTTPException, Query
 from pydantic import BaseModel, Field
+import uvicorn
 from db.db_connection import (
     upsert_map,
     upsert_tick,
@@ -244,3 +245,6 @@ def ingest_full(payload: FullIngestPayload = Body(...), generate_edges: bool = T
     except Exception as e:
         log.exception("ingest_full error")
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8082, reload=False)

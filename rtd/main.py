@@ -25,17 +25,17 @@ SAVE_FUNCTIONS = {
     "service_alerts": save_service_alerts
 }
 
-# --- Interval Config ---
+# Interval Config
 GTFS_INTERVAL_SECONDS = 60  # Real-time GTFS: every ~1 minute
 
 
 def update_gtfs_realtime_data():
-    print("🔁 Fetching GTFS-RT feeds...")
+    print("Fetching GTFS-RT feeds...")
     for data_type, url in GTFS_ENDPOINTS.items():
         try:
             rows = fetch_gtfs_realtime(url, data_type)
             if not rows:
-                print(f"⚠️ No rows parsed for {data_type}")
+                print(f"No rows parsed for {data_type}")
                 continue
 
             SAVE_FUNCTIONS[data_type](rows)
@@ -45,11 +45,11 @@ def update_gtfs_realtime_data():
 
 
 def main():
-    print("🚀 RTD module started.")
+    print("RTD module started.")
 
     while True:
         update_gtfs_realtime_data()
-        print(f"😴 Sleeping {GTFS_INTERVAL_SECONDS}s...\n")
+        print(f"Sleeping {GTFS_INTERVAL_SECONDS}s...\n")
         time.sleep(GTFS_INTERVAL_SECONDS)
 
 

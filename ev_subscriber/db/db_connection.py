@@ -14,7 +14,7 @@ log = logging.getLogger("ev_subscriber.db")
 load_dotenv()
 
 # Persistent connection
-_db_conn: Optional[psycopg.Connection] = None
+db_connection = None
 
 
 def get_db_connection(retries: int = 5, delay: int = 5) -> psycopg.Connection:
@@ -24,9 +24,9 @@ def get_db_connection(retries: int = 5, delay: int = 5) -> psycopg.Connection:
     - autocommit=True
     - row_factory=dict_row
     """
-    global _db_conn
-    if _db_conn is not None and not _db_conn.closed:
-        return _db_conn
+    global db_connection
+    if db_connection is not None and not db_connection.closed:
+        return db_connection
 
     dbname = os.getenv("POSTGRES_DB")
     user = os.getenv("POSTGRES_USER")
@@ -36,7 +36,7 @@ def get_db_connection(retries: int = 5, delay: int = 5) -> psycopg.Connection:
 
     for attempt in range(1, retries + 1):
         try:
-            _db_conn = psycopg.connect(
+            db_connection = psycopg.connect(
                 dbname=dbname,
                 user=user,
                 password=password,
@@ -46,7 +46,7 @@ def get_db_connection(retries: int = 5, delay: int = 5) -> psycopg.Connection:
                 row_factory=dict_row,
             )
             log.info("Connected to PostgreSQL.")
-            return _db_conn
+            return db_connection
         except psycopg.OperationalError as e:
             log.error(f"DB connect attempt {attempt}/{retries} failed: {e}")
             time.sleep(delay)
@@ -54,7 +54,7 @@ def get_db_connection(retries: int = 5, delay: int = 5) -> psycopg.Connection:
     raise RuntimeError("Failed to connect to the database after multiple attempts")
 
 
-# ---------- SQL (UPSERTS) ----------
+# SQL UPSERTS
 _SQL_UPSERT_MAP = """
 INSERT INTO consid_maps (map_name, dim_x, dim_y)
 VALUES (%s, %s, %s)
@@ -102,7 +102,7 @@ VALUES (%s, %s, %s, %s)
 ON CONFLICT DO NOTHING;
 """
 
-# --- NEW: EV trajectories UPSERT ---
+# EV trajectories UPSERT
 _SQL_UPSERT_EV_TRAJ = """
 INSERT INTO ev_trajectories (
   map_name, ev_id, tick, node_id, x, y,
@@ -120,8 +120,58 @@ ON CONFLICT (map_name, ev_id, tick) DO UPDATE SET
   meta           = EXCLUDED.meta;
 """
 
+_SQL_UPSERT_GAME = """
+INSERT INTO consid_games (
+  game_id, map_name, play_to_tick, started_at, last_response_at,
+  score_total, score_kwh_revenue, score_customer_satisfaction
+) VALUES (%s, %s, %s, now(), now(), %s, %s, %s)
+ON CONFLICT (game_id) DO UPDATE SET
+  map_name                    = EXCLUDED.map_name,
+  play_to_tick                = EXCLUDED.play_to_tick,
+  last_response_at            = now(),
+  score_total                 = COALESCE(EXCLUDED.score_total, consid_games.score_total),
+  score_kwh_revenue           = COALESCE(EXCLUDED.score_kwh_revenue, consid_games.score_kwh_revenue),
+  score_customer_satisfaction = COALESCE(EXCLUDED.score_customer_satisfaction, consid_games.score_customer_satisfaction);
+"""
 
-# ---------- Single-row UPSERTs ----------
+_SQL_UPSERT_CUSTOMER = """
+INSERT INTO consid_customers (
+  map_name, customer_id, persona, vehicle_type, max_charge_kwh, ev_id, created_at
+) VALUES (%s, %s, %s, %s, %s, %s, now())
+ON CONFLICT (map_name, customer_id) DO UPDATE SET
+  persona        = EXCLUDED.persona,
+  vehicle_type   = EXCLUDED.vehicle_type,
+  max_charge_kwh = EXCLUDED.max_charge_kwh,
+  ev_id          = EXCLUDED.ev_id;
+"""
+
+_SQL_UPSERT_ZONE = """
+INSERT INTO consid_zones (
+  map_name, zone_id, bbox, meta
+) VALUES (%s, %s, %s::jsonb, %s::jsonb)
+ON CONFLICT (map_name, zone_id) DO UPDATE SET
+  bbox = EXCLUDED.bbox,
+  meta = EXCLUDED.meta;
+"""
+
+_SQL_UPSERT_ZONE_LOG = """
+INSERT INTO consid_zone_logs (
+  map_name, tick, zone_id,
+  total_production, total_demand, total_revenue,
+  weather_type, sourceinfo_json, storageinfo_json, ingested_at
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now())
+ON CONFLICT (map_name, tick, zone_id) DO UPDATE SET
+  total_production = EXCLUDED.total_production,
+  total_demand     = EXCLUDED.total_demand,
+  total_revenue    = EXCLUDED.total_revenue,
+  weather_type     = EXCLUDED.weather_type,
+  sourceinfo_json  = EXCLUDED.sourceinfo_json,
+  storageinfo_json = EXCLUDED.storageinfo_json,
+  ingested_at      = now();
+"""
+
+
+# Single-row UPSERTs
 def upsert_map(map_name: str, dim_x: int, dim_y: int) -> None:
     try:
         conn = get_db_connection()
@@ -220,7 +270,7 @@ def upsert_ev_traj(
         log.error(f"upsert_ev_traj: {e}")
 
 
-# ---------- Batch helpers ----------
+# Batch jobs
 def upsert_nodes_batch(
         rows: Iterable[Tuple[str, str, int, int, Optional[str]]],
 ) -> None:
@@ -275,7 +325,9 @@ def insert_edges_batch(
 
 
 def upsert_ev_traj_batch(
-        rows: Iterable[Tuple[str, str, int, str, int, int, Optional[float], Optional[float], Optional[str], Optional[str], Optional[str], Optional[Dict[str, Any]]]],
+        rows: Iterable[Tuple[
+            str, str, int, str, int, int, Optional[float], Optional[float], Optional[str], Optional[str], Optional[str],
+            Optional[Dict[str, Any]]]],
 ) -> None:
     """
     rows: (map_name, ev_id, tick, node_id, x, y, soc_kwh, battery_kwh, state, customer_id, trip_intent_id, meta_dict)
@@ -294,7 +346,78 @@ def upsert_ev_traj_batch(
         log.error(f"upsert_ev_traj_batch: {e}")
 
 
-# ---------- Convenience reads ----------
+def upsert_game(
+        game_id: str,
+        map_name: str,
+        play_to_tick: int,
+        score_total: Optional[float] = None,
+        score_kwh: Optional[float] = None,
+        score_cs: Optional[float] = None,
+) -> None:
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(_SQL_UPSERT_GAME, (game_id, map_name, int(play_to_tick),
+                                           score_total, score_kwh, score_cs))
+    except Exception as e:
+        log.error(f"upsert_game: {e}")
+
+
+def upsert_customer(
+        map_name: str,
+        customer_id: str,
+        persona: Optional[str] = None,
+        vehicle_type: Optional[str] = None,
+        max_charge_kwh: Optional[float] = None,
+        ev_id: Optional[str] = None,
+) -> None:
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(_SQL_UPSERT_CUSTOMER,
+                        (map_name, customer_id, persona, vehicle_type, max_charge_kwh, ev_id))
+    except Exception as e:
+        log.error(f"upsert_customer: {e}")
+
+
+def upsert_zone(
+        map_name: str,
+        zone_id: str,
+        bbox: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            # Use %s::jsonb in SQL; pass raw JSON via psycopg.types.json.Json
+            cur.execute(_SQL_UPSERT_ZONE, (map_name, zone_id, Json(bbox or {}), Json(meta or {})))
+    except Exception as e:
+        log.error(f"upsert_zone: {e}")
+
+
+def upsert_zone_log(
+        map_name: str,
+        tick: int,
+        zone_id: str,
+        total_production: Optional[float] = None,
+        total_demand: Optional[float] = None,
+        total_revenue: Optional[float] = None,
+        weather_type: Optional[str] = None,
+        sourceinfo_json: Optional[Dict[str, Any]] = None,
+        storageinfo_json: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(_SQL_UPSERT_ZONE_LOG, (
+                map_name, int(tick), zone_id,
+                total_production, total_demand, total_revenue,
+                weather_type, Json(sourceinfo_json or {}), Json(storageinfo_json or {})
+            ))
+    except Exception as e:
+        log.error(f"upsert_zone_log: {e}")
+
+
 def fetch_latest_tick(map_name: str) -> Optional[int]:
     """
     Return latest ingested tick for a map, or None.

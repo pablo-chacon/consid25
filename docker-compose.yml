@@ -205,22 +205,31 @@ services:
       - lbrp-network
     restart: always
 
-  ev-subscriber:
+  considition:
+    image: considition/considition2025
+    ports:
+      - "8080:8080"
+    networks:
+      - lbrp-network
+    restart: unless-stopped
+
+  ev_subscriber:
     build:
       context: ./ev_subscriber
       dockerfile: Dockerfile
-    env_file:
-      - .env
+    env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - ./ev_subscriber:/app
+      considition:
+        condition: service_started
     networks:
       - lbrp-network
+    volumes:
+      - ./ev_subscriber:/app
     restart: always
 
   retention:
