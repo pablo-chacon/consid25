@@ -1,32 +1,49 @@
 import sys
 import time
+import os
 from client import ConsiditionClient
+from planner.planner import FlowAwarePlanner
+from dotenv import load_dotenv
 
 
-def should_move_on_to_next_tick(response):
+load_dotenv()
+API_KEY = os.getenv("API_KEY") or os.getenv("CONSID_API_KEY", "YOUR-KEY")
+BASE_URL = os.getenv("API_BASE") or os.getenv("CONSID_BASE_URL", "http://localhost:8080")
+MAP_NAME = os.getenv("MAP_NAME") or os.getenv("CONSID_MAP", "Turbohill")
+
+_raw_play_to_tick = os.getenv("PLAY_TO_TICK", "").strip()
+PLAY_TO_TICK = None
+USE_PLAY_TO_TICK = False
+if _raw_play_to_tick:
+    try:
+        PLAY_TO_TICK = int(_raw_play_to_tick)
+        USE_PLAY_TO_TICK = True
+    except ValueError:
+        PLAY_TO_TICK = None
+        USE_PLAY_TO_TICK = False
+else:
+    USE_PLAY_TO_TICK = os.getenv("USE_PLAY_TO_TICK", "true").lower() == "true"
+    PLAY_TO_TICK = None
+
+
+def should_move_on_to_next_tick(_response):
     return True
 
 
-def generate_customer_recommendations(map_obj, current_tick):
-    return []
-
-
-def generate_tick(map_obj, current_tick):
+def generate_tick(map_obj, current_tick, planner: FlowAwarePlanner):
+    # ensure planner uses the latest map snapshot for decisions
+    planner.update_map(map_obj)
     return {
         "tick": current_tick,
-        "customerRecommendations": generate_customer_recommendations(map_obj, current_tick),
+        "customerRecommendations": planner.recommendations_for_tick(current_tick),
     }
 
 
 def main():
-    api_key = "73e3373c-d83e-43b3-b383-c30dcb22b6e6"
-    base_url = "http://localhost:8080/"
-    map_name = "Turbohill"
-
-    client = ConsiditionClient(base_url, api_key)
+    client = ConsiditionClient(BASE_URL, API_KEY)
 
     try:
-        map_obj = client.get_map(map_name)
+        map_obj = client.get_map(MAP_NAME)
     except Exception as e:
         print(f"Failed to fetch map: {e}")
         sys.exit(1)
@@ -35,14 +52,19 @@ def main():
         print("Failed to fetch map!")
         sys.exit(1)
 
+    planner = FlowAwarePlanner(map_obj)
     final_score = 0
     good_ticks = []
 
-    current_tick = generate_tick(map_obj, 0)
+    # initial tick
+    current_tick = generate_tick(map_obj, 0, planner)
     input_payload = {
-        "mapName": map_name,
+        "mapName": MAP_NAME,
         "ticks": [current_tick],
     }
+    if USE_PLAY_TO_TICK:
+        # first submission can jump to the configured tick; for step-by-step use 0
+        input_payload["playToTick"] = PLAY_TO_TICK if PLAY_TO_TICK is not None else 0
 
     total_ticks = int(map_obj.get("ticks", 0))
 
@@ -62,27 +84,31 @@ def main():
                 print("Got no game response")
                 sys.exit(1)
 
-            # Sum the scores directly (assuming they are numbers)
             final_score = game_response.get("score", 0)
+            updated_map = game_response.get("map", map_obj) or map_obj
 
             if should_move_on_to_next_tick(game_response):
+                # build next tick using updated map and planner
                 good_ticks.append(current_tick)
-                updated_map = game_response.get("map", map_obj) or map_obj
-                current_tick = generate_tick(updated_map, i + 1)
+                next_tick_index = i + 1
+                current_tick = generate_tick(updated_map, next_tick_index, planner)
+
                 input_payload = {
-                    "mapName": map_name,
-                    "playToTick": i + 1,
+                    "mapName": MAP_NAME,
                     "ticks": [*good_ticks, current_tick],
                 }
+                if USE_PLAY_TO_TICK:
+                    input_payload["playToTick"] = next_tick_index
                 break
-
-            updated_map = game_response.get("map", map_obj) or map_obj
-            current_tick = generate_tick(updated_map, i)
-            input_payload = {
-                "mapName": map_name,
-                "playToTick": i,
-                "ticks": [*good_ticks, current_tick],
-            }
+            else:
+                # retry same tick with updated decisions if you ever implement backoff
+                current_tick = generate_tick(updated_map, i, planner)
+                input_payload = {
+                    "mapName": MAP_NAME,
+                    "ticks": [*good_ticks, current_tick],
+                }
+                if USE_PLAY_TO_TICK:
+                    input_payload["playToTick"] = i
 
     print(f"Final score: {final_score}")
 

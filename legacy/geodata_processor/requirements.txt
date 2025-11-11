@@ -1,7 +1,0 @@
-psycopg[binary]
-python-dotenv
-pandas
-geopy
-shapely
-geopandas
-psycopg_pool

@@ -1,6 +1,0 @@
-osmnx
-networkx
-numpy
-shapely
-psycopg[binary]
-python-dotenv

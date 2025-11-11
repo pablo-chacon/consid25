@@ -1,4 +1,0 @@
-psycopg[binary]
-python-dotenv
-Flask
-
