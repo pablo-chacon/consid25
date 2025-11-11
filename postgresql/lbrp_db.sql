@@ -1,52 +1,6 @@
 -- Enable PostGIS extension
 CREATE EXTENSION IF NOT EXISTS postgis;
 
--- Drop existing tables
-DROP TABLE IF EXISTS "mqtt_sessions" CASCADE;
-DROP TABLE IF EXISTS "geodata" CASCADE;
-DROP TABLE IF EXISTS "user_patterns" CASCADE;
-DROP TABLE IF EXISTS "pois" CASCADE;
-DROP TABLE IF EXISTS "optimized_routes" CASCADE;
-DROP TABLE IF EXISTS "trajectories" CASCADE;
-DROP TABLE IF EXISTS "hotspots" CASCADE;
-DROP TABLE IF EXISTS "predicted_pois" CASCADE;
-DROP TABLE IF EXISTS "predicted_pois_sequence" CASCADE;
-
--- MQTT sessions
-CREATE TABLE mqtt_sessions (
-                               "id" SERIAL PRIMARY KEY,  -- internal ID for DB management
-                               "session_id" INTEGER GENERATED ALWAYS AS IDENTITY UNIQUE,  -- trusted session_id used throughout UrbanOS
-                               "client_id" TEXT NOT NULL,
-                               "start_time" TIMESTAMP DEFAULT NOW(),
-                               "end_time" TIMESTAMP DEFAULT (NOW() + INTERVAL '26 hours'),
-                               UNIQUE (client_id, start_time)
-);
-
--- Incoming geodata (real-time)
-CREATE TABLE geodata (
-                         "id" SERIAL PRIMARY KEY,
-                         "session_id" INTEGER NOT NULL REFERENCES "mqtt_sessions" (session_id) ON DELETE CASCADE,
-                         "client_id" TEXT NOT NULL,
-                         "lat" FLOAT NOT NULL,
-                         "lon" FLOAT NOT NULL,
-                         "elevation" FLOAT,
-                         "speed" FLOAT,
-                         "activity" VARCHAR(50),
-                         "timestamp" TIMESTAMP DEFAULT NOW(),
-                         "geom" GEOMETRY(Point, 4326),
-                         "updated_at" TIMESTAMP DEFAULT NOW()
-);
-
--- Long-term storage of client movement
-CREATE TABLE "trajectories" (
-                                "id" SERIAL PRIMARY KEY,
-                                "client_id" TEXT NOT NULL,
-                                "session_id" INTEGER NOT NULL,
-                                "trajectory" JSONB NOT NULL,
-                                "created_at" TIMESTAMP DEFAULT NOW(),
-                                CONSTRAINT "unique_session_id" UNIQUE (session_id)
-);
-
 -- Routes from A*
 CREATE TABLE IF NOT EXISTS "astar_routes" (
                                               id SERIAL PRIMARY KEY,
@@ -71,7 +25,6 @@ CREATE TABLE IF NOT EXISTS "astar_routes" (
                                               predicted_eta TIMESTAMP,
                                               created_at TIMESTAMP DEFAULT NOW()
 );
-
 
 -- MAPF routing results
 CREATE TABLE IF NOT EXISTS "mapf_routes" (
@@ -99,15 +52,6 @@ CREATE TABLE IF NOT EXISTS "mapf_routes" (
                                              "created_at" TIMESTAMP DEFAULT NOW()
 );
 
--- Stop targets.
-CREATE TABLE IF NOT EXISTS "astar_stop_targets" (
-                                                    "id" SERIAL PRIMARY KEY,
-                                                    "client_id" TEXT NOT NULL,
-                                                    "stop_lat" FLOAT NOT NULL,
-                                                    "stop_lon" FLOAT NOT NULL,
-                                                    "eta_seconds" INTEGER NOT NULL,
-                                                    "created_at" TIMESTAMP DEFAULT NOW()
-);
 
 -- User location patterns
 CREATE TABLE "user_patterns" (
@@ -165,192 +109,6 @@ CREATE TABLE "predicted_pois_sequence" (
                                            "time_spent" FLOAT,
                                            "created_at" TIMESTAMP DEFAULT NOW(),
                                            UNIQUE ("client_id", "predicted_visit_time")
-);
-
--- GTFS Static
-CREATE TABLE IF NOT EXISTS "gtfs_routes" (
-                                             "route_id" TEXT PRIMARY KEY,
-                                             "agency_id" TEXT,
-                                             "route_short_name" TEXT,
-                                             "route_long_name" TEXT,
-                                             "route_type" INTEGER,
-                                             "route_desc" TEXT,
-                                             "geom" GEOMETRY(LineString, 4326)
-);
-
-
-CREATE TABLE IF NOT EXISTS "gtfs_calendar" (
-                                               "service_id" TEXT PRIMARY KEY,
-                                               "monday" INTEGER,
-                                               "tuesday" INTEGER,
-                                               "wednesday" INTEGER,
-                                               "thursday" INTEGER,
-                                               "friday" INTEGER,
-                                               "saturday" INTEGER,
-                                               "sunday" INTEGER,
-                                               "start_date" DATE,
-                                               "end_date" DATE
-);
-
-
-CREATE TABLE IF NOT EXISTS "gtfs_calendar_dates" (
-                                                     "service_id" TEXT REFERENCES "gtfs_calendar" ("service_id"),
-                                                     "date" DATE,
-                                                     "exception_type" INTEGER
-);
-
-
-CREATE TABLE IF NOT EXISTS "gtfs_stops" (
-                                            "stop_id" TEXT PRIMARY KEY,
-                                            "stop_code" TEXT,
-                                            "stop_name" TEXT,
-                                            "stop_desc" TEXT,
-                                            "stop_lat" DOUBLE PRECISION,
-                                            "stop_lon" DOUBLE PRECISION,
-                                            "zone_id" TEXT,
-                                            "stop_url" TEXT,
-                                            "location_type" INTEGER,
-                                            "parent_station" TEXT,
-                                            "stop_timezone" TEXT,
-                                            "wheelchair_boarding" INTEGER,
-                                            "platform_code" TEXT,
-                                            "geom" GEOMETRY(Point, 4326)
-);
-
-
-CREATE TABLE IF NOT EXISTS "gtfs_trips" (
-                                            "trip_id" TEXT PRIMARY KEY,
-                                            "route_id" TEXT REFERENCES "gtfs_routes" ("route_id"),
-                                            "service_id" TEXT REFERENCES "gtfs_calendar" ("service_id"),
-                                            "trip_headsign" TEXT,
-                                            "direction_id" INTEGER,
-                                            "shape_id" TEXT,
-                                            "geom" GEOMETRY(LineString, 4326)
-);
-
-
-CREATE TABLE IF NOT EXISTS "gtfs_stop_times" (
-                                                 "trip_id" TEXT REFERENCES "gtfs_trips" ("trip_id"),
-                                                 "arrival_time" TEXT,
-                                                 "departure_time" TEXT,
-                                                 "stop_id" TEXT,  -- Optional FK
-                                                 "stop_sequence" INTEGER,
-                                                 "stop_headsign" TEXT,
-                                                 "pickup_type" INTEGER,
-                                                 "drop_off_type" INTEGER,
-                                                 "shape_dist_traveled" FLOAT,
-                                                 "timepoint" INTEGER,
-                                                 "pickup_booking_rule_id" TEXT,
-                                                 "drop_off_booking_rule_id" TEXT,
-                                                 PRIMARY KEY ("trip_id", "stop_sequence")
-);
-
--- GTFS-RT
-CREATE TABLE IF NOT EXISTS vehicle_positions (
-                                                 vehicle_id TEXT NOT NULL,
-                                                 trip_id TEXT,
-                                                 route_id TEXT,
-                                                 stop_id TEXT,
-                                                 lat DOUBLE PRECISION,
-                                                 lon DOUBLE PRECISION,
-                                                 speed REAL,
-                                                 bearing REAL,
-                                                 timestamp TIMESTAMP,
-                                                 created_at TIMESTAMP DEFAULT NOW()
-);
-
-
-CREATE TABLE IF NOT EXISTS trip_updates (
-                                            trip_id TEXT NOT NULL,
-                                            stop_id TEXT,
-                                            arrival_time TIMESTAMP,
-                                            departure_time TIMESTAMP,
-                                            delay_seconds INTEGER,
-                                            status TEXT,
-                                            created_at TIMESTAMP DEFAULT NOW()
-);
-
-
-CREATE TABLE IF NOT EXISTS service_alerts (
-                                              alert_id TEXT PRIMARY KEY,
-                                              cause TEXT,
-                                              effect TEXT,
-                                              header_text TEXT,
-                                              description_text TEXT,
-                                              affected_entity TEXT,
-                                              start_time TIMESTAMP,
-                                              end_time TIMESTAMP,
-                                              created_at TIMESTAMP DEFAULT NOW()
-);
-
-
-CREATE TABLE IF NOT EXISTS "vehicle_arrivals" (
-                                                  "vehicle_id" TEXT,
-                                                  "trip_id" TEXT,
-                                                  "route_id" TEXT,
-                                                  "position_lat" FLOAT,
-                                                  "position_lon" FLOAT,
-                                                  "stop_id" TEXT,
-                                                  "timestamp" TIMESTAMP,
-                                                  "created_at" TIMESTAMP DEFAULT NOW()
-);
-
--- Create optimized_routes
-CREATE TABLE "optimized_routes" (
-                                    "session_id" INTEGER,
-                                    "client_id" TEXT NOT NULL,
-                                    "stop_id" TEXT,
-                                    "origin_lat" FLOAT NOT NULL,
-                                    "origin_lon" FLOAT NOT NULL,
-                                    "destination_lat" FLOAT NOT NULL,
-                                    "destination_lon" FLOAT NOT NULL,
-                                    "path" GEOMETRY(LineString, 4326) NOT NULL,
-                                    "segment_type" VARCHAR(50) DEFAULT 'unknown',
-                                    "created_at" TIMESTAMP DEFAULT NOW(),
-                                    "is_valid" BOOLEAN DEFAULT TRUE,
-                                    "is_chosen" BOOLEAN DEFAULT TRUE,
-                                    PRIMARY KEY ("client_id", "stop_id", "segment_type")
-);
-
--- Switch profile.
-CREATE TABLE IF NOT EXISTS "client_switch_profiles" (
-                                                        "client_id" TEXT NOT NULL,
-                                                        "stop_id" TEXT NOT NULL,
-                                                        "avg_switch_seconds" INTEGER NOT NULL,
-                                                        "last_updated" TIMESTAMP DEFAULT NOW(),
-                                                        PRIMARY KEY ("client_id", "stop_id")
-);
-
--- client weekly schedule
-CREATE TABLE IF NOT EXISTS "client_weekly_schedule" (
-                                                        "id" SERIAL PRIMARY KEY,
-                                                        "client_id" TEXT NOT NULL,
-                                                        "visit_day" TEXT NOT NULL,
-                                                        "predicted_time" TIMESTAMP NOT NULL,
-                                                        "poi_lat" FLOAT,
-                                                        "poi_lon" FLOAT,
-                                                        "prediction_type" TEXT CHECK ("prediction_type" IN ('weekly', 'daily')) DEFAULT 'weekly',
-                                                        "path" GEOMETRY(LineString, 4326),
-                                                        "segment_type" TEXT,
-                                                        "created_at" TIMESTAMP DEFAULT NOW()
-);
-
--- Reroutes are append-only history of “we changed our mind”
-CREATE TABLE IF NOT EXISTS reroutes (
-                                        id BIGSERIAL PRIMARY KEY,
-                                        client_id TEXT NOT NULL,
-                                        stop_id TEXT,                            -- may be NULL for direct
-                                        origin_lat FLOAT,
-                                        origin_lon FLOAT,
-                                        destination_lat FLOAT NOT NULL,
-                                        destination_lon FLOAT NOT NULL,
-                                        path GEOMETRY(LineString, 4326),         -- optional if we only log the decision
-                                        segment_type VARCHAR(50) DEFAULT 'unknown',   -- 'direct' | 'multimodal' | 'fallback' ...
-                                        reason TEXT,                              -- e.g. 'off_path_63m', 'delay_220s', 'departure_passed'
-                                        previous_stop_id TEXT,
-                                        previous_segment_type TEXT,
-                                        is_chosen BOOLEAN DEFAULT TRUE,          -- mirrors optimized_routes shape
-                                        created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Considition namespace
@@ -507,19 +265,7 @@ CREATE TABLE IF NOT EXISTS "consid_zone_logs" (
 );
 
 
--- Indexes (spatial and performance)
-CREATE INDEX IF NOT EXISTS "optimized_routes_path_idx" ON "optimized_routes" USING GIST ("path");
-CREATE INDEX IF NOT EXISTS "trajectory_idx" ON "trajectories" USING GIN ("trajectory" jsonb_path_ops);
-CREATE INDEX IF NOT EXISTS "optimized_routes_client_idx" ON "optimized_routes" ("client_id");
--- Pragmatic indexes
-CREATE INDEX IF NOT EXISTS "reroutes_client_idx" ON "reroutes" ("client_id", "created_at" DESC);
-CREATE INDEX IF NOT EXISTS "reroutes_dest_idx" ON "reroutes" ("destination_lat", "destination_lon");
-CREATE INDEX IF NOT EXISTS "reroutes_geom_idx" ON "reroutes" USING GIST ("path");
--- Geodata table indexes
-CREATE INDEX IF NOT EXISTS "geodata_mqtt_idx" ON "geodata" ("session_id");
-CREATE INDEX IF NOT EXISTS "geodata_client_idx" ON "geodata" ("client_id");
-CREATE INDEX IF NOT EXISTS "geodata_timestamp_idx" ON "geodata" ("timestamp");
-CREATE INDEX IF NOT EXISTS "geodata_geom_idx" ON "geodata" USING GIST ("geom");
+
 -- POI indexes
 CREATE INDEX IF NOT EXISTS "pois_geom_idx" ON "pois" USING GIST ("geom");
 CREATE INDEX IF NOT EXISTS "pois_client_idx" ON "pois" ("client_id");
@@ -538,19 +284,12 @@ CREATE INDEX IF NOT EXISTS "predicted_pois_sequence_type_idx" ON "predicted_pois
 CREATE INDEX IF NOT EXISTS "astar_routes_stop_id_idx" ON astar_routes ("stop_id");
 CREATE INDEX IF NOT EXISTS "astar_routes_client_idx" ON "astar_routes" ("client_id");
 CREATE INDEX IF NOT EXISTS idx_astar_stop_eta ON astar_routes (stop_id, predicted_eta);
-CREATE INDEX IF NOT EXISTS idx_trip_updates_stop_trip ON trip_updates (stop_id, trip_id, departure_time);
 
 CREATE INDEX IF NOT EXISTS "astar_routes_eta_idx" ON "astar_routes" ("distance");
 CREATE INDEX IF NOT EXISTS "astar_routes_geom_idx" ON "astar_routes" USING GIST ("path");
 CREATE INDEX IF NOT EXISTS "mapf_routes_client_idx" ON "mapf_routes" ("client_id");
 CREATE INDEX IF NOT EXISTS "mapf_routes_coords_idx" ON "mapf_routes" ("destination_lat", "destination_lon");
-CREATE INDEX IF NOT EXISTS "trajectories_created_idx" ON "trajectories" ("created_at");
-CREATE INDEX IF NOT EXISTS "optimized_routes_segment_idx" ON "optimized_routes" ("segment_type");
-CREATE INDEX IF NOT EXISTS "reroutes_segment_idx" ON "reroutes" ("segment_type");
-CREATE INDEX IF NOT EXISTS "geodata_client_time_idx" ON "geodata" ("client_id","timestamp" DESC, "updated_at" DESC);
-CREATE INDEX IF NOT EXISTS "mqtt_sessions_client_bounds_idx" ON "mqtt_sessions" ("client_id","start_time","end_time");
-CREATE INDEX IF NOT EXISTS "optimized_routes_client_time_idx" ON "optimized_routes" ("client_id","created_at" DESC);
-CREATE INDEX IF NOT EXISTS "reroutes_client_time_idx" ON "reroutes" ("client_id","created_at" DESC);
+
 -- Consid/EV's indexes
 CREATE INDEX IF NOT EXISTS idx_cons_nodes_map_xy ON consid_nodes (map_name, x, y);
 CREATE INDEX IF NOT EXISTS idx_cons_nodes_zone ON consid_nodes (zone_id);
@@ -574,87 +313,6 @@ CREATE INDEX IF NOT EXISTS "idx_cons_zone_logs_tick" ON "consid_zone_logs" ("map
 CREATE INDEX IF NOT EXISTS "idx_cons_zone_logs_green" ON "consid_zone_logs" ((COALESCE("total_production",0) - COALESCE("total_demand",0)) DESC);
 
 -- Views
-CREATE OR REPLACE VIEW "view_routing_candidates_gtfsrt" AS
-SELECT
-    ar.client_id,
-    ar.stop_id,
-    ar.predicted_eta,
-    va.trip_id,
-    va.route_id,
-    tu.arrival_time,
-    tu.departure_time,
-    tu.delay_seconds
-FROM astar_routes ar
-         JOIN vehicle_arrivals va
-              ON ar.stop_id = va.stop_id
-         JOIN trip_updates tu
-              ON va.trip_id = tu.trip_id
-WHERE ar.predicted_eta IS NOT NULL;
-
-
-CREATE OR REPLACE VIEW "lines" AS
-SELECT
-    route_id AS line_id,
-    CASE
-        WHEN route_type = 0 THEN 'tram'
-        WHEN route_type = 1 THEN 'subway'
-        WHEN route_type = 2 THEN 'rail'
-        WHEN route_type = 3 THEN 'bus'
-        WHEN route_type = 4 THEN 'ferry'
-        ELSE 'unknown'
-        END AS transport_type,
-    to_jsonb(gtfs_routes.*) AS content
-FROM gtfs_routes;
-
-
-CREATE OR REPLACE VIEW "view_static_gtfs_unified" AS
-SELECT
-    s.stop_id AS stop_point_id,
-    s.stop_name AS stop_point_name,
-    s.stop_lat,
-    s.stop_lon,
-    s.zone_id,
-    s.platform_code,
-    r.route_id,
-    r.route_short_name,
-    r.route_long_name,
-    r.route_type,
-    t.trip_id,
-    t.direction_id,
-    st.stop_sequence,
-    st.arrival_time,
-    st.departure_time
-FROM
-    gtfs_stops s
-        JOIN
-    gtfs_stop_times st ON s.stop_id = st.stop_id
-        JOIN
-    gtfs_trips t ON st.trip_id = t.trip_id
-        JOIN
-    gtfs_routes r ON t.route_id = r.route_id;
-
--- Active Clients view.
-CREATE OR REPLACE VIEW "view_active_clients_geodata" AS
-SELECT client_id
-FROM (
-         SELECT client_id,
-                MAX(timestamp) AS last_ts,
-                MAX(updated_at) AS last_seen
-         FROM geodata
-         GROUP BY client_id
-     ) sub
-WHERE last_ts >= NOW() - INTERVAL '26 hours'
-   OR last_seen >= NOW() - INTERVAL '2 seconds';
-
-
-CREATE OR REPLACE VIEW "view_current_session_id_from_geodata" AS
-SELECT DISTINCT ON (g."client_id")
-    g."client_id",
-    g."session_id"
-FROM "geodata" AS g
-ORDER BY g."client_id", g."timestamp" DESC, g."updated_at" DESC;
-
-
 CREATE OR REPLACE VIEW "view_astar_eta" AS
 SELECT
     ar.client_id,
@@ -729,69 +387,6 @@ SELECT
     updated_at,
     ST_AsGeoJSON(geom)::json AS geojson
 FROM hotspots;
-
-
-CREATE OR REPLACE VIEW view_latest_client_trajectories AS
-SELECT *
-FROM (
-         SELECT *,
-                ROW_NUMBER() OVER (PARTITION BY client_id ORDER BY created_at DESC) AS rn
-         FROM trajectories
-     ) sub
-WHERE rn <= 8;
-
-
-CREATE OR REPLACE VIEW view_departure_candidates AS
-SELECT
-    ar.client_id,
-    ar.predicted_eta,
-    ar.target_type,
-    ar.stop_id,
-    ar.parent_station,
-    ar.decision_context,
-
-    tu.trip_id,
-    tu.departure_time,
-    tu.arrival_time,
-    tu.delay_seconds,
-    tu.status,
-
-    gt.route_id,
-    gt.direction_id,
-    gt.trip_headsign
-FROM astar_routes ar
-         JOIN trip_updates tu
-              ON ar.stop_id = tu.stop_id
-         JOIN gtfs_trips gt
-              ON tu.trip_id = gt.trip_id
-WHERE
-    ar.target_type = 'stop_point'
-  AND ar.predicted_eta IS NOT NULL
-  AND tu.departure_time >= (ar.predicted_eta + INTERVAL '40 seconds')
-  AND tu.departure_time <= (ar.predicted_eta + INTERVAL '90 seconds');
-
-
-CREATE OR REPLACE VIEW "view_predicted_routes_schedule" AS
-SELECT
-    p."client_id",
-    p."predicted_visit_time",
-    p."predicted_lat",
-    p."predicted_lon",
-    p."prediction_type",
-    COALESCE(m."path", a."path") AS "route_path",
-    COALESCE(m."decision_context", a."decision_context") AS "decision_context",
-    COALESCE(m."created_at", a."created_at") AS "route_created_at"
-FROM "predicted_pois_sequence" p
-         LEFT JOIN "mapf_routes" m
-                   ON p."client_id" = m."client_id"
-                       AND p."predicted_lat" = m."destination_lat"
-                       AND p."predicted_lon" = m."destination_lon"
-         LEFT JOIN "astar_routes" a
-                   ON p."client_id" = a."client_id"
-                       AND p."predicted_lat" = a."destination_lat"
-                       AND p."predicted_lon" = a."destination_lon"
-WHERE p."predicted_visit_time" >= NOW()
-ORDER BY p."client_id", p."predicted_visit_time";
 
 
 CREATE OR REPLACE VIEW "view_hotspot_overlay" AS
@@ -1087,83 +682,6 @@ SELECT
 FROM nearest_departure n
 WHERE n.rn = 1;
 
--- Per-client boarding-window hits (40–90s window), last 24h
-CREATE OR REPLACE VIEW "view_boarding_window_hit_rate" AS
-WITH candidates AS (
-    SELECT
-        d."client_id",
-        d."stop_id",
-        d."trip_id",
-        d."departure_time",
-        d."predicted_eta",
-        (d."departure_time" BETWEEN (d."predicted_eta" + INTERVAL '40 seconds')
-            AND     (d."predicted_eta" + INTERVAL '90 seconds')) AS hit
-    FROM "view_departure_candidates" d
-    WHERE d."departure_time" >= NOW() - INTERVAL '24 hours'
-)
-SELECT
-    "client_id",
-    COUNT(*)                       AS total_candidates,
-    SUM(CASE WHEN hit THEN 1 ELSE 0 END) AS hits,
-    ROUND(100.0 * SUM(CASE WHEN hit THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 2) AS hit_rate_pct
-FROM candidates
-GROUP BY "client_id";
-
--- Latest live position per client (point geom)
-CREATE OR REPLACE VIEW "view_geodata_latest_point" AS
-SELECT
-    g."client_id",
-    g."session_id",
-    g."lat",
-    g."lon",
-    COALESCE(g."geom", ST_SetSRID(ST_MakePoint(g."lon", g."lat"), 4326)) AS geom,
-    g."speed",
-    g."activity",
-    g."timestamp",
-    g."updated_at"
-FROM (
-         SELECT
-             gg.*,
-             ROW_NUMBER() OVER (PARTITION BY gg."client_id" ORDER BY gg."timestamp" DESC, gg."updated_at" DESC) AS rn
-         FROM "geodata" gg
-     ) g
-WHERE g.rn = 1;
-
--- Stop usage by client (last 7 days)
-CREATE OR REPLACE VIEW "view_stop_usage_7d" AS
-SELECT
-    h."client_id",
-    COALESCE(h."stop_id", '∅') AS stop_id,
-    COUNT(*)                   AS route_count_7d,
-    MIN(h."created_at")        AS first_seen_7d,
-    MAX(h."created_at")        AS last_seen_7d
-FROM "view_routes_history" h
-WHERE h."created_at" >= NOW() - INTERVAL '7 days'
-GROUP BY h."client_id", COALESCE(h."stop_id", '∅');
-
--- Predicted POIs → nearest stops (prep for schedule/departure lookups)
-CREATE OR REPLACE VIEW "view_predicted_poi_nearest_stop" AS
-SELECT
-    p."id"               AS predicted_id,
-    p."client_id",
-    p."predicted_visit_time",
-    p."prediction_type",
-    p."predicted_lat",
-    p."predicted_lon",
-    p."geom"             AS predicted_geom,
-    s."stop_id",
-    s."stop_name",
-    s."parent_station",
-    s."platform_code",
-    s."geom"             AS stop_geom,
-    ST_DistanceSphere(p."geom", s."geom")::float AS meters_to_stop
-FROM "predicted_pois_sequence" p
-         LEFT JOIN LATERAL (
-    SELECT gs.*
-    FROM "gtfs_stops" gs
-    ORDER BY p."geom" <-> gs."geom"
-    LIMIT 1
-    ) s ON TRUE;
 
 -- Weekly plan joined with POI labels + nearest stop
 CREATE OR REPLACE VIEW "view_client_weekly_schedule_enriched" AS
@@ -1195,17 +713,6 @@ FROM "client_weekly_schedule" w
     LIMIT 1
     ) pn ON TRUE;
 
--- “Feasible next departures per client” (one best per client right now)
-CREATE OR REPLACE VIEW "view_next_feasible_departure_per_client" AS
-SELECT *
-FROM (
-         SELECT
-             d.*,
-             ROW_NUMBER() OVER (PARTITION BY d."client_id" ORDER BY d."departure_time" ASC) AS rn
-         FROM "view_departure_candidates" d
-         WHERE d."departure_time" >= NOW()
-     ) q
-WHERE rn = 1;
 
 -- Latest tick per map
 CREATE OR REPLACE VIEW consid_latest_tick AS

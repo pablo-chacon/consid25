@@ -14,7 +14,6 @@ from db.db_connection import (
     upsert_ev_traj_batch,
 )
 
-
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ev_subscriber.main")
 app = FastAPI(title="UrbanOS EV Subscriber", version="1.0.0")
@@ -51,7 +50,7 @@ class EVPoint(BaseModel):
 
     socKwh: Optional[float] = None
     batteryKwh: Optional[float] = None
-    state: Optional[str] = None          # driving|charging|waiting|idle|...
+    state: Optional[str] = None  # driving|charging|waiting|idle|...
     customerId: Optional[str] = None
     tripIntentId: Optional[str] = None
     meta: Optional[dict] = None
@@ -245,6 +244,7 @@ def ingest_full(payload: FullIngestPayload = Body(...), generate_edges: bool = T
     except Exception as e:
         log.exception("ingest_full error")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8082, reload=False)
