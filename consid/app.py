@@ -31,7 +31,7 @@ def should_move_on_to_next_tick(_response):
 
 
 def generate_tick(map_obj, current_tick, planner: FlowAwarePlanner):
-    # ensure planner uses the latest map snapshot for decisions
+    # ensure planner uses latest map snapshot for decisions
     planner.update_map(map_obj)
     return {
         "tick": current_tick,
@@ -63,7 +63,7 @@ def main():
         "ticks": [current_tick],
     }
     if USE_PLAY_TO_TICK:
-        # first submission can jump to the configured tick; for step-by-step use 0
+        # first submission configured tick; step-by-step use 0
         input_payload["playToTick"] = PLAY_TO_TICK if PLAY_TO_TICK is not None else 0
 
     total_ticks = int(map_obj.get("ticks", 0))
@@ -101,7 +101,7 @@ def main():
                     input_payload["playToTick"] = next_tick_index
                 break
             else:
-                # retry same tick with updated decisions if you ever implement backoff
+                # retry same tick with updated decisions
                 current_tick = generate_tick(updated_map, i, planner)
                 input_payload = {
                     "mapName": MAP_NAME,
