@@ -58,11 +58,15 @@ class FlowAwarePlanner:
         self.node_reservations: Dict[str, Dict[int, int]] = {}  # nodeId -> { tick: used_slots } for chargers
 
         # Tunables
-        self.AVG_SPEED_KMH = 40.0  # converts distances -> ticks
-        self.LOAD_SCALE = 5.0  # dampens edge load impact
-        self.CONGESTION_WEIGHT = 0.20  # kappa in edge cost = L * (1 + kappa * load/LOAD_SCALE)
+        self.AVG_SPEED_KMH = 40.0  # convert distances -> ticks
+        self.LOAD_SCALE = 5.0  # dampen edge load impact
+        self.CONGESTION_WEIGHT = 0.20  # edge cost = L * (1 + kappa * load/LOAD_SCALE)
         self.SOC_BUFFER = 0.10  # 10% safety margin
         self.VISIT_LIMIT = 20000  # CA* expansion cap
+
+        # SoC band for charging targets
+        self.MIN_SOC = 0.20
+        self.MAX_SOC = 0.80
 
     # Lifecycle
     def update_map(self, map_obj: dict):
@@ -77,7 +81,7 @@ class FlowAwarePlanner:
     def _build_graph(self, edges) -> Dict[str, List[Tuple[str, float, int]]]:
         adj: Dict[str, List[Tuple[str, float, int]]] = {}
         for e in edges:
-            a = e["fromNode"];
+            a = e["fromNode"]
             b = e["toNode"]
             L = float(e["length"])
             load = len(e.get("customers", []))  # live congestion
@@ -112,13 +116,13 @@ class FlowAwarePlanner:
 
     # travel timing
     def _travel_ticks(self, u: str, v: str, base_speed_kmh: float = None) -> int:
-        """Ticks (5 min) to traverse edge (u,v)."""
+        # Ticks (5 min) to traverse edge (u,v)
         if base_speed_kmh is None:
             base_speed_kmh = self.AVG_SPEED_KMH
         L = None
         for w, Lw, _load in self.adj.get(u, []):
             if w == v:
-                L = Lw;
+                L = Lw
                 break
         if L is None:
             return 9999
@@ -129,7 +133,8 @@ class FlowAwarePlanner:
     def _is_edge_reserved(self, u: str, v: str, t0: int, t1: int) -> bool:
         a, b = (u, v) if u < v else (v, u)
         occ = self.edge_reservations.get((a, b))
-        if not occ: return False
+        if not occ:
+            return False
         for t in range(t0, t1):
             if t in occ:
                 return True
@@ -142,7 +147,7 @@ class FlowAwarePlanner:
             occ.add(t)
 
     def _reserve_edge_sequence(self, node_tick_path: List[Tuple[str, int]], until_node: str):
-        """Reserve edges along (n_i,t_i)->(n_{i+1},t_{i+1}) up to `until_node` (inclusive)."""
+        # Reserve edges along (n_i,t_i)->(n_{i+1},t_{i+1}) up to `until_node` (inclusive)
         for i in range(len(node_tick_path) - 1):
             (u, t0), (v, t1) = node_tick_path[i], node_tick_path[i + 1]
             self._reserve_edge(u, v, t0, t1)
@@ -151,7 +156,7 @@ class FlowAwarePlanner:
 
     # charger reservations
     def _reserve_charger(self, node_id: str, start_tick: int, duration_ticks: int, capacity: int) -> int:
-        # Find the earliest tick >= start_tick with free charger slot, reserve it, return start tick
+        # Find earliest tick >= start_tick with free charger slot, reserve it, return start tick
         r = self.node_reservations.setdefault(node_id, {})
         t = start_tick
         while True:
@@ -168,13 +173,13 @@ class FlowAwarePlanner:
         ticks = math.ceil((needed_kwh * 12.0) / speed_kw)
         return max(1, ticks)
 
-    # Classic A* (kept as fallback / estimator)
+    # Classic A* (fallback / estimator)
     def _astar(self, start: str, goal: str, kappa: float = None) -> Tuple[List[str], float]:
         """Static A* (no time). Returns (path, distance-like cost)."""
         if kappa is None:
             kappa = self.CONGESTION_WEIGHT
         openq: List[Tuple[float, str]] = [(0.0, start)]
-        g = {start: 0.0};
+        g = {start: 0.0}
         came: Dict[str, str] = {}
         while openq:
             f, u = heapq.heappop(openq)
@@ -197,7 +202,7 @@ class FlowAwarePlanner:
 
     # Cooperative A* (time-expanded)
     def _ca_star(self, start: str, goal: str, start_tick: int, kappa: float = None) -> List[Tuple[str, int]]:
-        """Return a (node, tick) path with time-aware reservations (MAPF-lite)."""
+        # Return (node, tick) path with time-aware reservations (MAPF-lite).
         if kappa is None:
             kappa = self.CONGESTION_WEIGHT
 
@@ -213,7 +218,7 @@ class FlowAwarePlanner:
         visits = 0
 
         while pq and visits < self.VISIT_LIMIT:
-            f, (u, t) = heapq.heappop(pq);
+            f, (u, t) = heapq.heappop(pq)
             visits += 1
             if u == goal:
                 path = [(u, t)]
@@ -228,7 +233,7 @@ class FlowAwarePlanner:
                 dt = self._travel_ticks(u, v, base_speed_kmh=self.AVG_SPEED_KMH)
                 t_next = t + dt
 
-                # Hard avoidance: if edge-time is reserved, skip
+                # Hard avoidance: if edge-time reserved, skip
                 if self._is_edge_reserved(u, v, t, t_next):
                     continue
 
@@ -247,7 +252,7 @@ class FlowAwarePlanner:
 
     # Per-customer planning
     def _plan_single(self, cust: CustomerState, tick: int):
-        # ---------- inputs / safety ----------
+        # inputs / safety
         soc = max(0.0, float(cust.charge_remaining))
         cap = float(cust.max_charge)
         cons = max(1e-6, float(cust.consumption_per_km))
@@ -260,7 +265,7 @@ class FlowAwarePlanner:
         elif "eco" in persona:
             soc_buffer = 0.08
 
-        # ---------- CA* path to destination (we'll reserve only up to the chosen station) ----------
+        # CA* path to destination (main corridor)
         node_tick_path = self._ca_star(cust.from_node, cust.to_node, tick)
         nodes_seq = [n for (n, _t) in node_tick_path]
 
@@ -268,7 +273,7 @@ class FlowAwarePlanner:
         if len(nodes_seq) == 1 and nodes_seq[0] == cust.from_node:
             return None
 
-        # Total path distance (sum edge lengths)
+        # Total path distance (sum edge lengths) along main corridor
         dist_cost = 0.0
         for i in range(len(nodes_seq) - 1):
             u, v = nodes_seq[i], nodes_seq[i + 1]
@@ -280,87 +285,111 @@ class FlowAwarePlanner:
         kwh_left = soc * cap
         must_charge = (kwh_left < kwh_needed_total * (1.0 + soc_buffer))
 
-        # Cumulative distance to each node along CA* path
+        # Cumulative distance to each node along main CA* path
         cum_d: Dict[str, float] = {nodes_seq[0]: 0.0}
         for i in range(1, len(nodes_seq)):
             u, v = nodes_seq[i - 1], nodes_seq[i]
             L = next((L for w, L, _ in self.adj.get(u, []) if w == v), 0.0)
             cum_d[v] = cum_d[u] + L
 
-        # Micro top-up rule: secure completion with minimal time
-        # If customer hasn’t charged in the last 20% of route,
-        # grab a top-up (5–8% of capacity) at first reachable on-path station.
+        # -------- Alt corridor: second CA* with lighter congestion weight --------
+        try:
+            alt_path = self._ca_star(cust.from_node, cust.to_node, tick,
+                                     kappa=max(0.05, self.CONGESTION_WEIGHT * 0.5))
+            nodes_seq_alt = [n for (n, _t) in alt_path]
+            candidate_nodes: Set[str] = set(nodes_seq) | set(nodes_seq_alt)
+        except Exception:
+            alt_path = None
+            nodes_seq_alt = []
+            candidate_nodes = set(nodes_seq)
+
+        # Cumulative distance along alt corridor (for kWh to station calc)
+        cum_d_alt: Dict[str, float] = {}
+        if nodes_seq_alt:
+            cum_d_alt[nodes_seq_alt[0]] = 0.0
+            for i in range(1, len(nodes_seq_alt)):
+                u, v = nodes_seq_alt[i - 1], nodes_seq_alt[i]
+                L = next((L for w, L, _ in self.adj.get(u, []) if w == v), 0.0)
+                cum_d_alt[v] = cum_d_alt.get(u, 0.0) + L
+
+        # -------- Micro top-up rule: secure completion with minimal time --------
+        # Triggers last 35% and tops up ~7–10% of capacity on the main corridor.
         charged_before = self.charged_once.get(cust.id, False)
         if not charged_before and dist_cost > 0:
-            # Remaining fraction <= 0.20 + reachable station quick charge.
             for nid in nodes_seq:
                 if nid not in self.station_by_node:
                     continue
-                # remaining distance fraction from node
                 rem_km = max(0.0, dist_cost - cum_d.get(nid, 0.0))
-                if rem_km / max(dist_cost, 1e-6) > 0.20:
-                    continue  # not yet in the last 20%
-                # arrival tick at nid
+                if rem_km / max(dist_cost, 1e-6) > 0.35:
+                    continue  # not yet in the last 35%
                 t_arrive = next((t_ for n_, t_ in node_tick_path if n_ == nid), None)
                 if t_arrive is None:
                     continue
-                # reachable with current energy?
                 km_to_station = cum_d.get(nid, 0.0)
                 if kwh_left < km_to_station * cons * 1.05:
                     continue
                 st = self.station_by_node[nid]
-                # reserve edges up to the station
                 self._reserve_edge_sequence(node_tick_path, nid)
-                # tiny top-up (5–8% of capacity)
-                tiny_kwh = max(0.05 * cap, 0.08 * cap)
+                tiny_kwh = max(0.07 * cap, 0.10 * cap)  # 7–10%
                 charge_ticks = self._charge_duration_ticks(tiny_kwh, st.speed_kw)
                 _ = self._reserve_charger(nid, t_arrive, charge_ticks, st.free)
-                charge_to = min(1.0, (kwh_left + tiny_kwh) / cap)
+
+                charge_to = (kwh_left + tiny_kwh) / cap
+                # Clamp with exception: allow up to 90% if first-charge OR green window
+                cap_override = 0.90 if ((not charged_before) or (self._green_bonus(t_arrive) > 0.5)) else self.MAX_SOC
+                charge_to = min(cap_override, max(self.MIN_SOC, charge_to))
+
                 self.charged_once[cust.id] = True
                 return {
                     "customerId": cust.id,
                     "chargingRecommendations": [{"nodeId": nid, "chargeTo": round(charge_to, 3)}]
                 }
 
-        # Station selection on CA* corridor
-        # persona weights (scoring)
+        # -------- Station selection across BOTH corridors --------
         w_green = 1.0 if "eco" in persona else 0.3
-        w_queue = 1.2 if "stressed" in persona else 0.6  # stressed dislikes queues more
+        w_queue = 1.2 if "stressed" in persona else 0.6
         w_speed = 0.5
-        w_wait = 0.8
+        w_wait = 0.5  # reduced wait penalty
 
         best_station = None  # (node_id, StationInfo, t_arrive, need_kwh, score)
 
-        for nid in nodes_seq:
+        for nid in candidate_nodes:
             st = self.station_by_node.get(nid)
             if not st:
                 continue
 
-            # arrival tick at this node from CA* path
+            # arrival tick from either path
             t_arrive = next((t_ for n_, t_ in node_tick_path if n_ == nid), None)
+            if t_arrive is None and alt_path:
+                t_arrive = next((t_ for n_, t_ in alt_path if n_ == nid), None)
             if t_arrive is None:
                 continue
 
-            # energy to reach station
-            km_to_station = cum_d.get(nid, 0.0)
+            # distance to station from whichever corridor contains it
+            if nid in cum_d:
+                km_to_station = cum_d[nid]
+            elif nid in cum_d_alt:
+                km_to_station = cum_d_alt[nid]
+            else:
+                continue
+
             kwh_to_station = km_to_station * cons
             if kwh_left < kwh_to_station * (1.0 + 0.05):
                 continue  # can't reach safely
 
-            # energy after station to destination
             km_after = max(0.0, dist_cost - km_to_station)
             kwh_after = km_after * cons
             kwh_rem_after_station = max(0.0, kwh_left - kwh_to_station)
             need_kwh = max(0.0, kwh_after - kwh_rem_after_station)
 
-            # scoring terms
             green = self._green_bonus(t_arrive)
 
-            # predicted wait: node reservations at/after arrival
+            # predicted wait from reservations (probe a limited window)
             res = self.node_reservations.get(nid, {})
             pred_wait = 0
-            while res.get(t_arrive + pred_wait, 0) >= max(1, st.free):
-                pred_wait += 1  # ticks until a free slot
+            probe_limit = 12  # ≤ 1 hour lookahead
+            while pred_wait < probe_limit and res.get(t_arrive + pred_wait, 0) >= max(1, st.free):
+                pred_wait += 1
 
             queue_pressure = 0.0
             if st.total > 0:
@@ -378,7 +407,6 @@ class FlowAwarePlanner:
         if not best_station:
             if not must_charge:
                 return None
-            # Pick first reachable station on path ignoring score
             fallback = None
             for nid in nodes_seq:
                 st = self.station_by_node.get(nid)
@@ -396,20 +424,19 @@ class FlowAwarePlanner:
                 return None
             best_station = fallback
 
-        # Commit reservations & compute charge target
+        # -------- Commit reservations & compute charge target --------
         station_node, st, t_arrive, need_kwh, _score = best_station
 
-        # reserve edges chosen station (MAPF cooperative step)
+        # reserve edges to chosen station (main corridor reservations suffice)
         self._reserve_edge_sequence(node_tick_path, station_node)
 
-        # reserve charger slot
         charge_ticks = self._charge_duration_ticks(need_kwh, st.speed_kw)
-
         _ = self._reserve_charger(station_node, t_arrive, charge_ticks, st.free)
 
-        # SoC buffer avoid over-charging
-        BUFFER_FINISH = 0.08  # 8% buffer after station
-        km_to_station = cum_d.get(station_node, 0.0)
+        # Finish buffer: larger during green hours to sell more kWh
+        BUFFER_FINISH = 0.16 if (self._green_bonus(t_arrive) > 0.5) else 0.12
+
+        km_to_station = cum_d.get(station_node, cum_d_alt.get(station_node, 0.0))
         kwh_to_station = km_to_station * cons
         kwh_rem_after_station = max(0.0, kwh_left - kwh_to_station)
 
@@ -418,9 +445,13 @@ class FlowAwarePlanner:
         target_kwh_after_station = kwh_after * (1.0 + BUFFER_FINISH)
         required_from_station = max(0.0, target_kwh_after_station - kwh_rem_after_station)
 
-        charge_to = min(1.0, (kwh_left + required_from_station) / cap)
+        charge_to = (kwh_left + required_from_station) / cap
 
-        # mark customer charged 1<
+        # Enforce 20–80% band, with exception to 90% on first-charge/green
+        cap_override = 0.90 if ((not self.charged_once.get(cust.id, False)) or (
+                    self._green_bonus(t_arrive) > 0.5)) else self.MAX_SOC
+        charge_to = min(cap_override, max(self.MIN_SOC, charge_to))
+
         self.charged_once[cust.id] = True
 
         return {
@@ -433,7 +464,7 @@ class FlowAwarePlanner:
     # Tick entrypoint
     def recommendations_for_tick(self, tick: int) -> List[dict]:
         """
-        Build charging recommendations for all customers visible on the current map snapshot.
+        Build charging recommendations for all customers visible on current map snapshot.
         Skips customers already Charging/Waiting/Arrived/Failed.
         """
         recs: List[dict] = []

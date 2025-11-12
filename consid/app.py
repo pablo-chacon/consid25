@@ -1,6 +1,7 @@
 import sys
 import time
 import os
+from collections import defaultdict
 from client import ConsiditionClient
 from planner.planner import FlowAwarePlanner
 from dotenv import load_dotenv
@@ -9,11 +10,37 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("API_KEY") or os.getenv("CONSID_API_KEY", "YOUR-KEY")
 BASE_URL = os.getenv("API_BASE") or os.getenv("CONSID_BASE_URL", "http://localhost:8080")
-MAP_NAME = os.getenv("MAP_NAME") or os.getenv("CONSID_MAP", "Turbohill")
-
+MAP_NAME = os.getenv("MAP_NAME") or os.getenv("CONSID_MAP", "Batterytown")
 _raw_play_to_tick = os.getenv("PLAY_TO_TICK", "").strip()
 PLAY_TO_TICK = None
 USE_PLAY_TO_TICK = False
+
+
+PHASES = [
+    (0, 71, "night"),
+    (72, 143, "morning"),
+    (144, 215, "midday"),
+    (216, 287, "evening"),
+]
+
+
+def phase_of(tick: int) -> str:
+    t = tick % 288
+    for lo, hi, name in PHASES:
+        if lo <= t <= hi:
+            return name
+    return "night"
+
+
+def kpis(map_obj):
+    states = {}
+    for n in map_obj.get("nodes", []):
+        for c in n.get("customers", []):
+            s = c.get("state")
+            states[s] = states.get(s, 0) + 1
+    return states
+
+
 if _raw_play_to_tick:
     try:
         PLAY_TO_TICK = int(_raw_play_to_tick)
@@ -56,6 +83,13 @@ def main():
     final_score = 0
     good_ticks = []
 
+    # tracking for score breakdown
+    prev_rev = 0
+    prev_comp = 0
+    prev_score = 0
+    phase_rev = defaultdict(int)  # phase -> cumulative ΔkWhRevenue
+    phase_comp = defaultdict(int)  # phase -> cumulative Δcompletion
+
     # initial tick
     current_tick = generate_tick(map_obj, 0, planner)
     input_payload = {
@@ -84,11 +118,33 @@ def main():
                 print("Got no game response")
                 sys.exit(1)
 
-            final_score = game_response.get("score", 0)
+            final_score = int(game_response.get("score", 0))
             updated_map = game_response.get("map", map_obj) or map_obj
 
+            # Per-tick score deltas + phase aggregation
+            rev = int(game_response.get("kwhRevenue", 0))
+            comp = int(game_response.get("customerCompletionScore", 0))
+            score = int(game_response.get("score", 0))
+
+            d_rev = rev - prev_rev
+            d_comp = comp - prev_comp
+            d_score = score - prev_score
+
+            ph = phase_of(i)
+            phase_rev[ph] += d_rev
+            phase_comp[ph] += d_comp
+
+            if (i % 12) == 0 or i == total_ticks - 1:
+                print(f"[t={i:4d} {ph:7s}] ΔkWh={d_rev:+4d}  Δcust={d_comp:+4d}  "
+                      f"totals: kWh={rev} cust={comp} score={score}")
+            if (i % 24) == 0:
+                states = kpis(updated_map)
+                waiting = states.get("WaitingForCharger", 0)
+                print(f"   charger_wait={waiting}")
+            prev_rev, prev_comp, prev_score = rev, comp, score
+
             if should_move_on_to_next_tick(game_response):
-                # build next tick using updated map and planner
+                # build next tick updated map and planner
                 good_ticks.append(current_tick)
                 next_tick_index = i + 1
                 current_tick = generate_tick(updated_map, next_tick_index, planner)
@@ -101,7 +157,7 @@ def main():
                     input_payload["playToTick"] = next_tick_index
                 break
             else:
-                # retry same tick with updated decisions
+                # retry same tick updated decisions
                 current_tick = generate_tick(updated_map, i, planner)
                 input_payload = {
                     "mapName": MAP_NAME,
@@ -110,7 +166,12 @@ def main():
                 if USE_PLAY_TO_TICK:
                     input_payload["playToTick"] = i
 
-    print(f"Final score: {final_score}")
+    # Phase summary
+    print("\n=== Phase contribution summary ===")
+    for name in ["night", "morning", "midday", "evening"]:
+        print(f"{name:7s}: +kWh={phase_rev[name]:5d}  +cust={phase_comp[name]:5d}")
+
+    print(f"\nFinal score: {final_score}")
 
 
 if __name__ == "__main__":
