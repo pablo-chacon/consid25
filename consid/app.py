@@ -2,19 +2,38 @@ import sys
 import time
 import os
 from collections import defaultdict
-from client import ConsiditionClient
-from planner.planner import FlowAwarePlanner
 from dotenv import load_dotenv
-
+from client import ConsiditionClient
+# Use XGB-backed planner (inherits FlowAwarePlanner and falls back safely)
+from ml_planner.planner_xgb import FlowAwarePlannerXGB as FlowAwarePlanner
 
 load_dotenv()
-API_KEY = os.getenv("API_KEY") or os.getenv("CONSID_API_KEY", "YOUR-KEY")
+API_KEY = os.getenv("API_KEY") or os.getenv("CONSID_API_KEY", "API_KEY")
 BASE_URL = os.getenv("API_BASE") or os.getenv("CONSID_BASE_URL", "http://localhost:8080")
 MAP_NAME = os.getenv("MAP_NAME") or os.getenv("CONSID_MAP", "Batterytown")
-_raw_play_to_tick = os.getenv("PLAY_TO_TICK", "").strip()
-PLAY_TO_TICK = None
-USE_PLAY_TO_TICK = False
+_raw_play_to_tick = (os.getenv("PLAY_TO_TICK") or "").strip()
+IS_CLOUD = "api.considition.com" in (BASE_URL or "")
 
+# Normalize URL to https on cloud
+if IS_CLOUD and BASE_URL.startswith("http://"):
+    BASE_URL = BASE_URL.replace("http://", "https://", 1)
+
+# Never playToTick on cloud (422 guard)
+if IS_CLOUD:
+    USE_PLAY_TO_TICK = False
+    PLAY_TO_TICK = None
+else:
+    # Local/dev only
+    if _raw_play_to_tick:
+        try:
+            PLAY_TO_TICK = int(_raw_play_to_tick)
+            USE_PLAY_TO_TICK = True
+        except ValueError:
+            PLAY_TO_TICK = None
+            USE_PLAY_TO_TICK = False
+    else:
+        USE_PLAY_TO_TICK = os.getenv("USE_PLAY_TO_TICK", "false").lower() == "true"
+        PLAY_TO_TICK = None
 
 PHASES = [
     (0, 71, "night"),
@@ -24,12 +43,11 @@ PHASES = [
 ]
 
 
-def phase_of(tick: int) -> str:
-    t = tick % 288
-    for lo, hi, name in PHASES:
-        if lo <= t <= hi:
-            return name
-    return "night"
+def phase_of(tick: int, total_ticks: int = 288) -> str:
+    segment = total_ticks // 4 or 1
+    phases = ["night", "morning", "midday", "evening"]
+    idx = min(tick // segment, 3)
+    return phases[idx]
 
 
 def kpis(map_obj):
@@ -41,23 +59,11 @@ def kpis(map_obj):
     return states
 
 
-if _raw_play_to_tick:
-    try:
-        PLAY_TO_TICK = int(_raw_play_to_tick)
-        USE_PLAY_TO_TICK = True
-    except ValueError:
-        PLAY_TO_TICK = None
-        USE_PLAY_TO_TICK = False
-else:
-    USE_PLAY_TO_TICK = os.getenv("USE_PLAY_TO_TICK", "true").lower() == "true"
-    PLAY_TO_TICK = None
-
-
 def should_move_on_to_next_tick(_response):
     return True
 
 
-def generate_tick(map_obj, current_tick, planner: FlowAwarePlanner):
+def generate_tick(map_obj, current_tick, planner):
     # ensure planner uses latest map snapshot for decisions
     planner.update_map(map_obj)
     return {
@@ -80,6 +86,7 @@ def main():
         sys.exit(1)
 
     planner = FlowAwarePlanner(map_obj)
+
     final_score = 0
     good_ticks = []
 
@@ -96,7 +103,7 @@ def main():
         "mapName": MAP_NAME,
         "ticks": [current_tick],
     }
-    if USE_PLAY_TO_TICK:
+    if not IS_CLOUD and USE_PLAY_TO_TICK:
         # first submission configured tick; step-by-step use 0
         input_payload["playToTick"] = PLAY_TO_TICK if PLAY_TO_TICK is not None else 0
 
@@ -128,23 +135,24 @@ def main():
 
             d_rev = rev - prev_rev
             d_comp = comp - prev_comp
-            d_score = score - prev_score
+            d_score = score - prev_score  # kept for completeness
 
             ph = phase_of(i)
             phase_rev[ph] += d_rev
             phase_comp[ph] += d_comp
 
-            if (i % 12) == 0 or i == total_ticks - 1:
+            if (i % 24) == 0 or i == total_ticks - 1:
                 print(f"[t={i:4d} {ph:7s}] ΔkWh={d_rev:+4d}  Δcust={d_comp:+4d}  "
                       f"totals: kWh={rev} cust={comp} score={score}")
-            if (i % 24) == 0:
+            if (i % 48) == 0:
                 states = kpis(updated_map)
                 waiting = states.get("WaitingForCharger", 0)
                 print(f"   charger_wait={waiting}")
+
             prev_rev, prev_comp, prev_score = rev, comp, score
 
             if should_move_on_to_next_tick(game_response):
-                # build next tick updated map and planner
+                # build next tick using updated map and planner
                 good_ticks.append(current_tick)
                 next_tick_index = i + 1
                 current_tick = generate_tick(updated_map, next_tick_index, planner)
@@ -153,17 +161,17 @@ def main():
                     "mapName": MAP_NAME,
                     "ticks": [*good_ticks, current_tick],
                 }
-                if USE_PLAY_TO_TICK:
+                if not IS_CLOUD and USE_PLAY_TO_TICK:
                     input_payload["playToTick"] = next_tick_index
                 break
             else:
-                # retry same tick updated decisions
+                # retry same tick with updated decisions
                 current_tick = generate_tick(updated_map, i, planner)
                 input_payload = {
                     "mapName": MAP_NAME,
                     "ticks": [*good_ticks, current_tick],
                 }
-                if USE_PLAY_TO_TICK:
+                if not IS_CLOUD and USE_PLAY_TO_TICK:
                     input_payload["playToTick"] = i
 
     # Phase summary
