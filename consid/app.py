@@ -1,10 +1,9 @@
 import sys
 import time
 import os
-from collections import defaultdict
 from dotenv import load_dotenv
 from client import ConsiditionClient
-# Use XGB-backed planner (inherits FlowAwarePlanner and falls back safely)
+# XGB-backed planner
 from ml_planner.planner_xgb import FlowAwarePlannerXGB as FlowAwarePlanner
 
 load_dotenv()
@@ -25,7 +24,7 @@ if IS_CLOUD:
     USE_PLAY_TO_TICK = False
     PLAY_TO_TICK = None
 else:
-    # Local/dev only
+    # Local/dev
     if _raw_play_to_tick:
         try:
             PLAY_TO_TICK = int(_raw_play_to_tick)
@@ -38,17 +37,6 @@ else:
         PLAY_TO_TICK = None
 
 
-def phase_of(tick: int, total_ticks: int = 288) -> str:
-    """
-    Simple 4-phase segmentation used for debug summaries.
-    Assumes 288 ticks (24h * 12 ticks/hour) unless overridden.
-    """
-    segment = total_ticks // 4 or 1
-    phases = ["night", "morning", "midday", "evening"]
-    idx = min(tick // segment, 3)
-    return phases[idx]
-
-
 def kpis(map_obj):
     states = {}
     for n in map_obj.get("nodes", []):
@@ -59,6 +47,7 @@ def kpis(map_obj):
 
 
 def should_move_on_to_next_tick(_response):
+    # Hook for future retry logic; currently always advance.
     return True
 
 
@@ -99,8 +88,6 @@ def main():
     prev_rev = 0
     prev_comp = 0
     prev_score = 0
-    phase_rev = defaultdict(int)   # phase -> cumulative ΔkWhRevenue
-    phase_comp = defaultdict(int)  # phase -> cumulative Δcompletion
 
     # initial tick
     current_tick = generate_tick(map_obj, 0, planner)
@@ -137,22 +124,19 @@ def main():
             final_score = int(game_response.get("score", 0))
             updated_map = game_response.get("map", map_obj) or map_obj
 
-            # Per-tick score deltas + phase aggregation
+            # Per-tick score deltas (note: with USE_PLAY_TO_TICK=false,
+            # these are deltas vs last full-game response, not true per-tick deltas)
             rev = int(game_response.get("kwhRevenue", 0))
             comp = int(game_response.get("customerCompletionScore", 0))
             score = int(game_response.get("score", 0))
 
             d_rev = rev - prev_rev
             d_comp = comp - prev_comp
-            d_score = score - prev_score
-
-            ph = phase_of(i, total_ticks=total_ticks)
-            phase_rev[ph] += d_rev
-            phase_comp[ph] += d_comp
+            d_score = score - prev_score  # kept for completeness/debug
 
             if (i % 24) == 0 or i == total_ticks - 1:
                 print(
-                    f"[t={i:4d} {ph:7s}] ΔkWh={d_rev:+4d}  Δcust={d_comp:+4d}  "
+                    f"[t={i:4d}] ΔkWh={d_rev:+4d}  Δcust={d_comp:+4d}  "
                     f"totals: kWh={rev} cust={comp} score={score}"
                 )
             if (i % 48) == 0:
@@ -185,12 +169,7 @@ def main():
                 if not IS_CLOUD and USE_PLAY_TO_TICK:
                     input_payload["playToTick"] = i
 
-    # Phase summary
-    print("\n=== Phase contribution summary ===")
-    for name in ["night", "morning", "midday", "evening"]:
-        print(f"{name:7s}: +kWh={phase_rev[name]:5d}  +cust={phase_comp[name]:5d}")
-
-    print(f"\nFinal score: {final_score}")
+    print(f"\nFinal kWhRevenue={prev_rev}  customerCompletion={prev_comp}  score={final_score}")
 
 
 if __name__ == "__main__":
