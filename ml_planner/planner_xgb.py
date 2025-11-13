@@ -275,7 +275,7 @@ class FlowAwarePlannerXGB(FlowAwarePlanner):
 
         kwh_left = soc * cap
 
-        # --- 1) Stressed personas: bump/micro charge at first possible station ---
+        # Stressed personas: bump/micro charge at first possible station
         if is_stressed and dist_cost > 0.0:
             first_reachable = None
             first_green_reachable = None

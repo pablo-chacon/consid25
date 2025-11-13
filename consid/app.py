@@ -8,10 +8,12 @@ from client import ConsiditionClient
 from ml_planner.planner_xgb import FlowAwarePlannerXGB as FlowAwarePlanner
 
 load_dotenv()
+
 API_KEY = os.getenv("API_KEY") or os.getenv("CONSID_API_KEY", "API_KEY")
 BASE_URL = os.getenv("API_BASE") or os.getenv("CONSID_BASE_URL", "http://localhost:8080")
 MAP_NAME = os.getenv("MAP_NAME") or os.getenv("CONSID_MAP", "Batterytown")
 _raw_play_to_tick = (os.getenv("PLAY_TO_TICK") or "").strip()
+
 IS_CLOUD = "api.considition.com" in (BASE_URL or "")
 
 # Normalize URL to https on cloud
@@ -35,15 +37,12 @@ else:
         USE_PLAY_TO_TICK = os.getenv("USE_PLAY_TO_TICK", "false").lower() == "true"
         PLAY_TO_TICK = None
 
-PHASES = [
-    (0, 71, "night"),
-    (72, 143, "morning"),
-    (144, 215, "midday"),
-    (216, 287, "evening"),
-]
-
 
 def phase_of(tick: int, total_ticks: int = 288) -> str:
+    """
+    Simple 4-phase segmentation used for debug summaries.
+    Assumes 288 ticks (24h * 12 ticks/hour) unless overridden.
+    """
     segment = total_ticks // 4 or 1
     phases = ["night", "morning", "midday", "evening"]
     idx = min(tick // segment, 3)
@@ -64,7 +63,13 @@ def should_move_on_to_next_tick(_response):
 
 
 def generate_tick(map_obj, current_tick, planner):
-    # ensure planner uses latest map snapshot for decisions
+    """
+    Build a single tick payload.
+
+    - planner.update_map(map_obj) keeps the planner's CA* / MAPF
+      reservations and station snapshot in sync with the API map.
+    - recommendations_for_tick(current_tick) returns all customer decisions.
+    """
     planner.update_map(map_obj)
     return {
         "tick": current_tick,
@@ -94,7 +99,7 @@ def main():
     prev_rev = 0
     prev_comp = 0
     prev_score = 0
-    phase_rev = defaultdict(int)  # phase -> cumulative ΔkWhRevenue
+    phase_rev = defaultdict(int)   # phase -> cumulative ΔkWhRevenue
     phase_comp = defaultdict(int)  # phase -> cumulative Δcompletion
 
     # initial tick
@@ -104,10 +109,14 @@ def main():
         "ticks": [current_tick],
     }
     if not IS_CLOUD and USE_PLAY_TO_TICK:
-        # first submission configured tick; step-by-step use 0
+        # first submission configured tick; step-by-step uses 0
         input_payload["playToTick"] = PLAY_TO_TICK if PLAY_TO_TICK is not None else 0
 
     total_ticks = int(map_obj.get("ticks", 0))
+
+    if total_ticks <= 0:
+        print("Map reports zero ticks; nothing to play.")
+        sys.exit(1)
 
     for i in range(total_ticks):
         while True:
@@ -135,15 +144,17 @@ def main():
 
             d_rev = rev - prev_rev
             d_comp = comp - prev_comp
-            d_score = score - prev_score  # kept for completeness
+            d_score = score - prev_score
 
-            ph = phase_of(i)
+            ph = phase_of(i, total_ticks=total_ticks)
             phase_rev[ph] += d_rev
             phase_comp[ph] += d_comp
 
             if (i % 24) == 0 or i == total_ticks - 1:
-                print(f"[t={i:4d} {ph:7s}] ΔkWh={d_rev:+4d}  Δcust={d_comp:+4d}  "
-                      f"totals: kWh={rev} cust={comp} score={score}")
+                print(
+                    f"[t={i:4d} {ph:7s}] ΔkWh={d_rev:+4d}  Δcust={d_comp:+4d}  "
+                    f"totals: kWh={rev} cust={comp} score={score}"
+                )
             if (i % 48) == 0:
                 states = kpis(updated_map)
                 waiting = states.get("WaitingForCharger", 0)
