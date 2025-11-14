@@ -1,7 +1,7 @@
 
 ---
 
-## Considition 2025, Intelligent EV Routing Planner
+## Considition 2025 Hackaton, Intelligent EV Routing Planner
 
 This repository contains my solution for the Considition 2025 challenge.
 The goal of the competition is to design an algorithm that makes smart charging and routing decisions for a fleet of electric vehicles, taking into account multiple factors such as energy consumption, charger availability, waiting time, sustainability and customer satisfaction.
@@ -93,4 +93,5 @@ Environment variables in `.env` control behaviour, including policy training, AP
 This project is open for educational and experimental use.
 
 ---
+
 
