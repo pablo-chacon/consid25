@@ -1,0 +1,42 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "tick": 30,
+        "customerId": "0.3",
+        "note": "Grid coordinates, not real-world lat/lon"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            4.0,
+            7.0
+          ],
+          [
+            5.0,
+            7.0
+          ],
+          [
+            6.0,
+            7.0
+          ],
+          [
+            7.0,
+            7.0
+          ],
+          [
+            8.0,
+            7.0
+          ],
+          [
+            8.0,
+            8.0
+          ]
+        ]
+      }
+    }
+  ]
+}
